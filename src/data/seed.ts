@@ -8,7 +8,7 @@ const emp = (id: string): Actor => ({ name: EMPLOYEES.find((e) => e.id === id)!.
 
 export function emptyState(anchorMs: number): AppState {
   return {
-    schemaVersion: 5, anchor: iso(anchorMs), seq: { ticket: 0, audit: 0, knowledge: 0, device: 0 }, devices: {}, tickets: {}, diagnoses: [], runbooks: seedRunbooks(), knowledge: [],
+    schemaVersion: 6, anchor: iso(anchorMs), seq: { ticket: 0, audit: 0, knowledge: 0, device: 0 }, devices: {}, tickets: {}, diagnoses: [], runbooks: seedRunbooks(), knowledge: [],
     settings: { ...DEFAULT_SETTINGS, baselines: { ...DEFAULT_SETTINGS.baselines } }, settingsHistory: [{ settings: DEFAULT_SETTINGS, reason: 'Prototype defaults (illustrative assumptions)', actor: 'System', at: iso(anchorMs - 8 * DAY) }],
     approvals: [], executions: [], audit: [], notifications: [], ui: { role: 'ADMIN' },
   };
@@ -54,7 +54,7 @@ export function driver(start: AppState) {
 const T = (expectedMin: number): Timing => ({ stepMs: Math.round((expectedMin * MIN) / 4), verifyMs: Math.round((expectedMin * MIN) / 4), closeMs: MIN });
 
 /**
- * Small curated history: ~16 incidents over the last week, each illustrating one path through the
+ * Small curated history: ~18 incidents over the last week, each illustrating one path through the
  * V1.2 lifecycle — self-service, escalation + approval, unsupported + learning, failure + rollback,
  * rejection, declined consent and reopening. Generated with the real actions so every audit trail is genuine.
  */
@@ -73,7 +73,11 @@ export function buildSeed(anchorMs: number): AppState {
       const w = d.create('EMP-044', { title: 'No Wi-Fi after travelling', description: 'Cannot get online in the office.', issueType: 'WIFI' }, b + 60 * MIN); d.answers(w, PATHS.wifiTurnedOn, b + 61 * MIN);
       const st = d.create('EMP-063', { title: 'Disk full warning', description: 'Cannot save files, says disk is full.', issueType: 'STORAGE' }, b + 120 * MIN);
       const t1 = d.answers(st, PATHS.storageEscalate, b + 121 * MIN);
-      A({ type: 'APPROVE', ticketId: st, acknowledged: true }, t1 + 6 * MIN); d.settle(t1 + 6 * MIN + 1, t1 + 30 * MIN, T(3)); }
+      A({ type: 'APPROVE', ticketId: st, acknowledged: true }, t1 + 6 * MIN); d.settle(t1 + 6 * MIN + 1, t1 + 30 * MIN, T(3));
+      // Network-wide outage: AI correctly declines a laptop fix; resolved manually (a recurring unsupported pattern)
+      const nw = d.create('EMP-044', { title: 'Wi-Fi down for the whole floor', description: 'Nobody on floor 2 can get online.', issueType: 'WIFI' }, b + 240 * MIN);
+      const t2 = d.answers(nw, PATHS.wifiNetworkWide, b + 241 * MIN);
+      A({ type: 'RESOLVE_MANUAL', ticketId: nw, rootCause: 'Floor 2 access point lost its uplink', steps: 'Network team restarted the floor 2 access point', verification: 'Floor 2 laptops online for 30 minutes' }, t2 + 50 * MIN); }
     // 5 days ago — Wi-Fi: self-service fails → approved AI fix; storage self-service
     { const b = day(5);
       const w = d.create('EMP-078', { title: 'Wi-Fi keeps dropping', description: 'Disconnects every few minutes at my desk.', issueType: 'WIFI' }, b);
@@ -107,7 +111,12 @@ export function buildSeed(anchorMs: number): AppState {
       const t2 = d.answers(r, PATHS.restartEscalate, b + 61 * MIN);
       A({ type: 'APPROVE', ticketId: r, acknowledged: true }, t2 + 5 * MIN);
       E(r, { type: 'CONSENT', ticketId: r, grant: false }, t2 + 9 * MIN);
-      A({ type: 'RESOLVE_MANUAL', ticketId: r, rootCause: 'Pending updates', steps: 'Restarted together with the employee after their meetings', verification: 'No restart pending' }, t2 + 240 * MIN); }
+      A({ type: 'RESOLVE_MANUAL', ticketId: r, rootCause: 'Pending updates', steps: 'Restarted together with the employee after their meetings', verification: 'No restart pending' }, t2 + 240 * MIN);
+      // App hang AI has no fix for — resolved manually (it recurs yesterday)
+      const h = d.create('EMP-057', { title: 'Expense app crashes on export', description: 'Expense tool stops responding when I export a report.', issueType: 'APP_HANG' }, b + 120 * MIN);
+      const t3 = d.answers(h, PATHS.appHangEscalate, b + 121 * MIN);
+      A({ type: 'INVESTIGATE', ticketId: h, reason: 'No known fix — investigating' }, t3 + 20 * MIN);
+      A({ type: 'RESOLVE_MANUAL', ticketId: h, rootCause: 'Corrupted expense app cache after the last update', steps: 'Cleared the expense app cache and signed in again', verification: 'Export completed twice without freezing' }, t3 + 80 * MIN); }
     // 2 days ago — self-service then reopened → re-diagnosed → approved AI fix; app update with consent
     { const b = day(2);
       const s1 = d.create('EMP-063', { title: 'Laptop sluggish', description: 'Apps freeze for seconds at a time.', issueType: 'SLOW' }, b);

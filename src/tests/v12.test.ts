@@ -1,7 +1,8 @@
 import { applyAction, processDue, type Action, type CreateTicketInput, type KnowledgeDraft } from '../domain/engine';
 import { approvalStatus, productStatus } from '../domain/lifecycle';
 import { METRIC_DEFS, cohort, dashboard, savedForTicket, type Filters } from '../domain/metrics';
-import { actionQueue, workspaceCounts } from '../domain/insights';
+import { actionQueue, fixTrackRecord, opportunities, similarIncidents, workspaceCounts } from '../domain/insights';
+import { currentDiagnosis } from '../domain/engine';
 import { emptyState, buildSeed, PATHS } from '../data/seed';
 import { loadState, validateState, STORAGE_KEY } from '../data/persistence';
 import { csvCell } from '../pages/Audit';
@@ -205,14 +206,14 @@ describe('dashboard calculations', () => {
   const f: Filters = { from: localDateKey(NOW - 6 * DAY), to: localDateKey(NOW) };
   it('distribution reconciles with total and rates follow the V1.2 formulas', () => {
     const d = dashboard(seed, f);
-    expect(d.total).toBe(16);
+    expect(d.total).toBe(18);
     expect(d.distSum).toBe(d.total);
     const ss = cohort(seed, f).filter((t) => METRIC_DEFS.selfService.test(t, seed)).length;
     const ha = cohort(seed, f).filter((t) => METRIC_DEFS.humanApproved.test(t, seed)).length;
     expect(d.aiRate).toBeCloseTo((ss + ha) / d.total);
     expect(d.ssRate).toBeCloseTo(ss / d.total);
     expect(d.unsupportedRate).toBeCloseTo(d.everUnsupported / d.total);
-    expect(d.currentUnsupported + d.unsupportedResolved).toBeLessThanOrEqual(d.everUnsupported);
+    expect(d.unsupportedBreakdown.reduce((a, r) => a + r.count, 0)).toBe(d.everUnsupported);
   });
   it('time saved = Σ(baseline − admin minutes); failed AI attempts count against it', () => {
     const d = dashboard(seed, f);
@@ -239,6 +240,31 @@ describe('dashboard calculations', () => {
     expect(all.every((x) => x.why.length > 10)).toBe(true);
     const overdue = actionQueue(seed, NOW, 'OVERDUE');
     expect(overdue.every((x) => all.some((y) => y.ticket.id === x.ticket.id))).toBe(true);
+  });
+  it('recommendation evidence: diagnosis confidence and fix track record are separate, and the similar-incident summary matches its list', () => {
+    const w = Object.values(seed.tickets).find((t) => t.status === 'AWAITING_APPROVAL' && t.issueType === 'WIFI')!;
+    const d = currentDiagnosis(seed, w)!;
+    expect(d.match).toEqual(expect.objectContaining({ kind: 'RUNBOOK', id: d.runbookId }));
+    expect(d.telemetry?.consistent).toBe(true);
+    const tr = fixTrackRecord(seed, d.runbookId, w.id);
+    // Only admin-approved runs of this exact fix count — self-service closures never ran it.
+    expect(tr.runs.every((r) => r.execution.runbookId === d.runbookId && seed.approvals.some((a) => a.id === r.execution.approvalId))).toBe(true);
+    expect([tr.verified, tr.failed, tr.finished]).toEqual([1, 1, 2]);
+    const sim = similarIncidents(seed, w.id);
+    expect(Object.values(sim.counts).reduce((a, b) => a + b, 0)).toBe(sim.items.length);
+    expect(sim.total).toBe(sim.items.length);
+    expect(sim.counts.SELF_SERVICE).toBeGreaterThan(0);
+  });
+  it('unsupported breakdown is exhaustive; opportunities rank by frequency × manual effort with taught issues last', () => {
+    const all = dashboard(seed, { from: '2000-01-01', to: localDateKey(NOW) });
+    expect(all.unsupportedBreakdown.reduce((a, r) => a + r.count, 0)).toBe(all.everUnsupported);
+    const ops = opportunities(seed, NOW);
+    expect(ops.reduce((a, o) => a + o.tickets.length, 0)).toBe(all.everUnsupported);
+    const untaught = ops.filter((o) => !o.covered);
+    for (let i = 1; i < untaught.length; i++) expect(untaught[i - 1].effortMin).toBeGreaterThanOrEqual(untaught[i].effortMin);
+    expect(ops[ops.length - 1].covered).toBe(true);
+    expect(ops.map((o) => o.rank)).toEqual(ops.map((_, i) => i + 1));
+    expect(ops[0].tickets.length).toBeGreaterThan(1);
   });
   it('seeded history contains no autonomous executions — every execution has an approval', () => {
     expect(seed.executions.length).toBeGreaterThan(0);

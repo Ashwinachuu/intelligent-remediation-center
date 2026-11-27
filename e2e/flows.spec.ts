@@ -222,3 +222,34 @@ test('Phone navigation drawer closes on Escape and when tapping the current page
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Overview' }).click();
   await expect(sidebar).not.toHaveClass(/open/);
 });
+
+test('Evidence, metrics and learning priorities are consistent on screen', async ({ page }) => {
+  await fresh(page);
+  // Recommendation: detection trail, separate confidence vs fix track record, similar summary = list
+  await page.goto('/#/approvals');
+  await page.getByTestId('approval-queue').locator('tbody tr').first().click();
+  await expect(page.getByTestId('detection').locator('li')).toHaveCount(5);
+  await expect(page.getByTestId('detection')).toContainText('Matched approved fix');
+  await expect(page.getByTestId('track-record')).toContainText('1 of 2 verified');
+  await expect(page.getByTestId('decision-summary')).toContainText('Diagnosis confidence');
+  const summary = await page.getByTestId('similar-summary').textContent();
+  const listed = await page.getByTestId('similar').locator('ul li').count();
+  expect(Number(summary!.match(/^(\d+)/)![1])).toBe(listed);
+  expect([...summary!.matchAll(/(\d+) (?:fixed|ai fix|still)/gi)].reduce((a, m) => a + Number(m[1]), 0)).toBe(listed);
+  // Overview: unsupported breakdown adds up to the rate's numerator
+  await page.goto('/#/overview?preset=30');
+  const num = Number(await page.getByTestId('unsupported-rate').locator('xpath=following-sibling::div[1]').locator('.term b').first().textContent());
+  expect(num).toBeGreaterThan(0);
+  const rows = page.getByTestId('unsupported-breakdown').locator('li:not(.total) span');
+  let sum = 0; for (let i = 0; i < await rows.count(); i++) sum += Number(await rows.nth(i).textContent());
+  expect(sum).toBe(num);
+  await expect(page.getByTestId('unsupported-breakdown').locator('li.total')).toContainText(String(num));
+  // Opportunities: ranked by manual effort, taught issues last
+  await page.goto('/#/opportunities');
+  await expect(page.getByTestId('opportunities').locator('tbody tr').first()).toContainText('Application not responding');
+  await expect(page.getByTestId('opportunities').locator('tbody tr').last()).toContainText('Taught');
+  // Settings: safety controls separated; reporting assumptions collapsed
+  await page.goto('/#/settings');
+  await expect(page.getByTestId('safety-controls').getByText('Always on')).toHaveCount(3);
+  await expect(page.getByTestId('reporting-assumptions')).not.toHaveAttribute('open', '');
+});

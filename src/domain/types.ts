@@ -73,6 +73,10 @@ export interface Diagnosis {
   id: string; ticketId: string; revision: number; category: Category; confidence: number; risk: Risk;
   rootCause: string; evidence: string[]; uncertainty: string[]; runbookId?: string; runbookVersion?: number; knowledgeId?: string;
   planHash: string; settingsVersion: number; createdAt: string; recommendable: boolean; reasons: string[];
+  /** What the laptop's health data showed when AI checked it (absent when a validated resolution matched first). */
+  telemetry?: { text: string; consistent: boolean };
+  /** What AI matched the incident to. */
+  match?: { kind: 'KNOWLEDGE' | 'RUNBOOK' | 'NONE'; id?: string; title?: string };
 }
 
 export interface RunbookStep { id: string; description: string }
@@ -140,7 +144,7 @@ export interface AuditEvent {
 export interface AppNotification { id: string; ticketId?: string; recipient: Role; message: string; at: string; read: boolean }
 
 export interface AppState {
-  schemaVersion: 5;
+  schemaVersion: 6;
   anchor: string;
   seq: { ticket: number; audit: number; knowledge: number; device: number };
   devices: Record<string, Device>;

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Laptop, Send, User } from 'lucide-react';
+import { Laptop, Send, Sparkles, User } from 'lucide-react';
 import { useStore } from '../app/store';
 import { DEMO_EMPLOYEE, ISSUE_TYPES } from '../domain/catalog';
 import type { IssueType } from '../domain/types';
@@ -45,6 +45,12 @@ export function RaiseTicketPage() {
           <div className="info-box"><User size={16} aria-hidden /><div><div className="small muted">Your details (filled in automatically)</div><strong>{e.name}</strong><div className="small">{e.department} · {e.email}</div></div></div>
           <div className="info-box"><Laptop size={16} aria-hidden /><div><div className="small muted">Your laptop (detected automatically)</div><strong>{e.deviceName}</strong><div className="small">{e.os}</div></div></div>
         </div>
+        <div className="info-box" data-testid="what-next" style={{ alignItems: 'flex-start' }}><Sparkles size={16} aria-hidden /><div><strong className="small">What happens after you submit</strong>
+          <ol className="small" style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+            <li>AI reads the issue type and your description to work out what kind of problem it is.</li>
+            <li>It asks you a few questions and suggests safe steps you can do yourself — one at a time.</li>
+            <li>If that doesn’t fix it, AI checks your laptop’s health data, matches it to known fixes and sends the same ticket to IT with everything you’ve tried. Nothing changes on your laptop unless IT approves it.</li>
+          </ol></div></div>
         <div className="row"><button className="btn btn-primary" onClick={submit} disabled={busy} data-testid="submit-ticket"><Send size={16} aria-hidden />Submit and get help</button><span className="small muted">You’ll get one ticket — the same one IT sees if they need to step in.</span></div>
       </div>
     </div>

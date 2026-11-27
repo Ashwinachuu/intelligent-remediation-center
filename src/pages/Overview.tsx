@@ -30,6 +30,17 @@ export const drill = (f: Filters, metric: string | null, extra: Record<string, s
   return `/incidents?${q}`;
 };
 
+const OPEN_COLOR = '#d4dde6';
+const SEG: Record<string, string> = { selfService: COLOR.SELF_SERVICE, humanApproved: COLOR.HUMAN_APPROVED, manual: COLOR.MANUAL, status_REVIEW_NEEDED: '#e8b04b', status_UNSUPPORTED: 'var(--danger)', status_MANUAL: '#c98a3a', status_REMEDIATION: '#6fb7ba' };
+/** One clickable term of a metric equation: the number links to exactly the incidents it counts. */
+function T({ to, n, l, c }: { to: string; n: number; l: string; c?: string }) {
+  return <Link className="term" to={to}>{c && <i style={{ width: 8, height: 8, borderRadius: 2, background: c, display: 'inline-block' }} aria-hidden />}<b>{n}</b><span className="small">{l}</span></Link>;
+}
+
+function Frac({ top, bottom }: { top: React.ReactNode; bottom: React.ReactNode }) {
+  return <div className="fraction" role="group" aria-label="Formula"><div className="equation">{top}</div><div className="equation frac-bottom">{bottom}</div></div>;
+}
+
 function Kpi({ label, value, to, sub, testid }: { label: string; value: string | number; to: string; sub?: string; testid?: string }) {
   return <Link className="kpi" to={to} data-testid={testid}><span className="label">{label}</span><span className="value">{value}</span>{sub && <span className="sub">{sub}</span>}</Link>;
 }
@@ -42,7 +53,7 @@ export function OverviewPage() {
   const [f, preset, set] = useFilters(now);
   const m = useMemo(() => ({ d: dashboard(state, f), perDay: resolvedPerDay(state, f), unsup: unsupportedPerDay(state, f), turn: turnaround(state, f) }), [state, f.from, f.to, f.issueType]); // eslint-disable-line react-hooks/exhaustive-deps
   const { d } = m;
-  const other = d.dist.filter((x) => ['status_SELF_SERVICE', 'status_MANUAL', 'status_REOPENED', 'status_OPEN'].includes(x.key));
+  const openCount = d.dist.filter((x) => x.key.startsWith('status_')).reduce((a, x) => a + x.count, 0);
   const resolvedTotal = m.perDay.reduce((a, r) => a + r.SELF_SERVICE + r.HUMAN_APPROVED + r.MANUAL, 0);
   const s = state.settings;
   const savedTip = `Estimated, not measured. For each incident: manual handling baseline (per category, e.g. Wi-Fi ${s.baselines.WIFI} min) − admin minutes actually spent. Self-service spends 0; approving costs ${s.reviewEffortMin} min; a rollback adds ${s.rollbackEffortMin} min; manual work costs the full baseline. Failed AI attempts therefore count against the total. Elapsed resolution time is NOT used.`;
@@ -66,28 +77,47 @@ export function OverviewPage() {
         <Kpi label="Remediation in progress" value={d.dist[5].count} to={drill(f, 'status_REMEDIATION')} testid="kpi-remediation" />
         <Kpi label="Manually resolved" value={d.dist[2].count} to={drill(f, 'manual')} testid="kpi-manual" />
       </div>
-      <p className="small muted" data-testid="reconcile">Other open: {other.map((o, i) => <span key={o.key}>{i ? ' · ' : ''}<Link to={drill(f, o.key)}>{o.label} {o.count}</Link></span>)}. All states together = {d.distSum} = total reported {d.total}.</p>
+      <section className="card stack" style={{ marginTop: 12 }} aria-labelledby="h-out" data-testid="reconcile">
+        <h2 id="h-out">Where every reported incident stands</h2>
+        <div className="equation" data-testid="outcome-equation">
+          <T to={drill(f, 'all')} n={d.total} l="reported" /><span className="op">=</span>
+          <T to={drill(f, 'selfService')} n={d.ssCount} l="self-service" c={COLOR.SELF_SERVICE} /><span className="op">+</span>
+          <T to={drill(f, 'humanApproved')} n={d.dist[1].count} l="human-approved AI" c={COLOR.HUMAN_APPROVED} /><span className="op">+</span>
+          <T to={drill(f, 'manual')} n={d.dist[2].count} l="manual" c={COLOR.MANUAL} /><span className="op">+</span>
+          <T to={drill(f, 'stillOpen')} n={openCount} l="still open" c={OPEN_COLOR} />
+        </div>
+        <div className="outcome-bar" aria-hidden>{d.dist.filter((x) => x.count).map((x) => <Link key={x.key} to={drill(f, x.key)} title={`${x.label}: ${x.count}`} style={{ width: `${(x.count / Math.max(1, d.total)) * 100}%`, background: SEG[x.key] ?? OPEN_COLOR }} />)}</div>
+        <div className="outcome-legend">{d.dist.filter((x) => x.count || x.key.startsWith('status_') === false).map((x) => <Link key={x.key} to={drill(f, x.key)}><i style={{ background: SEG[x.key] ?? OPEN_COLOR }} />{x.label} {x.count}</Link>)}</div>
+        <p className="small muted" style={{ margin: 0 }}>Each incident is counted exactly once, in its current state ({d.distSum} = {d.total}). The success metrics below are shares of the same {d.total}; the unsupported rate is a separate lens that cuts across these outcomes.</p>
+      </section>
 
       <div className="grid grid-3" style={{ marginTop: 16 }}>
         <section className="card stack" aria-labelledby="q1">
           <h2 id="q1">1 · How many incidents is AI helping resolve?</h2>
-          <Link to={drill(f, 'aiAssisted')} className="big-metric" data-testid="ai-rate"><span className="big">{fmtPct(d.aiRate)}</span><span>Verified AI-assisted resolution rate</span></Link>
-          <p className="small muted">(Self-service closures {d.ssCount} + human-approved AI closures {d.aiCount - d.ssCount}) ÷ {d.total} reported. Primary success metric. Reopened incidents are excluded until closed again.</p>
-          <Link to={drill(f, 'selfService')} className="big-metric small-big" data-testid="ss-rate"><span className="big">{fmtPct(d.ssRate)}</span><span>Employee self-service resolution rate</span></Link>
-          <p className="small muted">{d.ssCount} ÷ {d.total} — resolved with no administrator involvement.</p>
+          <Link to={drill(f, 'aiAssisted')} className="big-metric" data-testid="ai-rate"><span className="big">{fmtPct(d.aiRate)}</span><span>AI-assisted resolution rate</span></Link>
+          <Frac top={<><T to={drill(f, 'selfService')} n={d.ssCount} l="self-service" c={COLOR.SELF_SERVICE} /><span className="op">+</span><T to={drill(f, 'humanApproved')} n={d.aiCount - d.ssCount} l="approved AI fix" c={COLOR.HUMAN_APPROVED} /></>} bottom={<T to={drill(f, 'all')} n={d.total} l="reported" />} />
+          <p className="small muted" style={{ margin: 0 }}>Primary success metric: closed and verified with AI’s help. Reopened incidents don’t count until closed again.</p>
+          <Link to={drill(f, 'selfService')} className="big-metric small-big" data-testid="ss-rate"><span className="big">{fmtPct(d.ssRate)}</span><span>Employee self-service rate</span></Link>
+          <Frac top={<T to={drill(f, 'selfService')} n={d.ssCount} l="self-service" c={COLOR.SELF_SERVICE} />} bottom={<T to={drill(f, 'all')} n={d.total} l="reported" />} />
+          <p className="small muted" style={{ margin: 0 }}>The part of the AI-assisted rate that needed no admin at all.</p>
         </section>
         <section className="card stack" aria-labelledby="q2">
           <h2 id="q2">2 · Where is AI unable to help?</h2>
           <Link to={drill(f, 'everUnsupported')} className="big-metric" data-testid="unsupported-rate"><span className="big">{fmtPct(d.unsupportedRate)}</span><span>Unsupported incident rate</span></Link>
-          <p className="small muted">{d.everUnsupported} of {d.total} incidents where AI had no reliable recommendation — <Link to={drill(f, 'currentUnsupported')}>{d.currentUnsupported} still unsupported</Link>, <Link to={drill(f, 'unsupportedResolved')}>{d.unsupportedResolved} since resolved</Link>. <Link to="/opportunities">Turn them into knowledge →</Link></p>
-          <div style={{ height: 120 }} aria-label="Unsupported incidents by day reported">
+          <Frac top={<T to={drill(f, 'everUnsupported')} n={d.everUnsupported} l="AI couldn’t help" c="var(--danger)" />} bottom={<T to={drill(f, 'all')} n={d.total} l="reported" />} />
+          <p className="small muted" style={{ margin: 0 }}>Tracked separately from outcomes: an incident counts here if AI had no reliable recommendation at any point — even if an admin resolved it later. Where those {d.everUnsupported} are now:</p>
+          <ul className="breakdown" data-testid="unsupported-breakdown">
+            {d.unsupportedBreakdown.map((r) => <li key={r.key}><Link to={drill(f, 'everUnsupported', r.extra)}>{r.label}</Link><span>{r.count}</span></li>)}
+            <li className="total"><span>Total</span><span>{d.unsupportedBreakdown.reduce((a, r) => a + r.count, 0)}</span></li>
+          </ul>
+          <div style={{ height: 90 }} aria-label="Unsupported incidents by day reported">
             <ResponsiveContainer width="100%" height="100%"><BarChart data={m.unsup} margin={{ top: 4, right: 4, left: -28, bottom: 0 }}>
               <XAxis dataKey="day" tickFormatter={(x: string) => x.slice(5)} tick={{ fontSize: 10, fill: '#52677c' }} minTickGap={12} /><YAxis allowDecimals={false} tick={{ fontSize: 10, fill: '#52677c' }} />
               <Tooltip content={({ active, payload, label }) => active && payload?.length ? <div className="chart-tooltip"><strong>{label}</strong><div>{String(payload[0].value)} unsupported of {(payload[0].payload as { reported: number }).reported} reported</div></div> : null} />
               <Bar dataKey="unsupported" fill="var(--danger)" radius={[3, 3, 0, 0]} cursor="pointer" onClick={(x: unknown) => { const day = (x as { payload?: { day: string } }).payload?.day; if (day) nav(drill(f, 'everUnsupported', { from: day, to: day })); }} />
             </BarChart></ResponsiveContainer>
           </div>
-          <p className="chart-summary">Unsupported incidents by the day they were reported.</p>
+          <p className="chart-summary" style={{ margin: 0 }}>By the day they were reported. <Link to="/opportunities">See which to teach AI first →</Link></p>
         </section>
         <section className="card stack" aria-labelledby="q3">
           <h2 id="q3">3 · How much admin effort is AI eliminating?</h2>

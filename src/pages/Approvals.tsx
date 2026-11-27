@@ -4,6 +4,7 @@ import { ArrowRight, Inbox } from 'lucide-react';
 import { useStore } from '../app/store';
 import { currentDiagnosis, planRunbook } from '../domain/engine';
 import { approvalStatus } from '../domain/lifecycle';
+import { fixTrackRecord } from '../domain/insights';
 import { fmtAge } from '../domain/metrics';
 import { ApprovalBadge, ConfidenceBadge, Empty, RiskBadge, fmtShort } from '../components/ui';
 import { ms } from '../domain/util';
@@ -24,17 +25,16 @@ export function ApprovalsPage() {
       <h2>Waiting for a decision ({pending.length})</h2>
       {pending.length === 0 ? <div className="card"><Empty title="No fixes are waiting for approval" icon={<Inbox size={28} aria-hidden />} /></div> : (
         <div className="table-wrap"><table className="data" data-testid="approval-queue">
-          <thead><tr><th>Incident</th><th>Employee</th><th>Proposed remediation</th><th>AI confidence</th><th>Expected impact</th><th>Waiting</th><th>Status</th><th /></tr></thead>
-          <tbody>{pending.map((t) => { const d = currentDiagnosis(state, t)!; const rb = planRunbook(state, d); return (
+          <thead><tr><th>Proposed fix</th><th>Diagnosis confidence</th><th>Fix track record</th><th>Risk &amp; rollback</th><th>Employee impact</th><th>Waiting</th><th /></tr></thead>
+          <tbody>{pending.map((t) => { const d = currentDiagnosis(state, t)!; const rb = planRunbook(state, d); const tr = fixTrackRecord(state, rb?.id, t.id); return (
             <tr key={t.id} className="clickable" onClick={() => nav(`/incidents/${t.id}`)}>
-              <td><Link to={`/incidents/${t.id}`} onClick={(e) => e.stopPropagation()}><strong>{t.displayId}</strong></Link><div>{t.title}</div></td>
-              <td>{t.requester}</td>
-              <td>{rb?.title}<div><RiskBadge risk={d.risk} /></div></td>
-              <td><ConfidenceBadge value={d.confidence} threshold={state.settings.confidenceThreshold} /></td>
-              <td className="small">{rb?.employeeImpact}{rb?.reversible ? '' : ' · not reversible'}</td>
+              <td><strong>{rb?.title}</strong><div className="small"><Link to={`/incidents/${t.id}`} onClick={(e) => e.stopPropagation()}>{t.displayId}</Link> {t.title} · {t.requester}</div></td>
+              <td><ConfidenceBadge value={d.confidence} threshold={state.settings.confidenceThreshold} /><div className="small muted">that the cause is right</div></td>
+              <td>{tr.finished ? <><strong>{tr.verified} of {tr.finished}</strong> verified{tr.failed ? <div className="small warn-text">{tr.failed} failed before</div> : null}</> : <span className="muted">First use</span>}</td>
+              <td><RiskBadge risk={d.risk} /><div className="small muted">{rb?.reversible ? 'Rollback available' : 'Not reversible'}</div></td>
+              <td className="small">{rb?.employeeImpact}</td>
               <td style={{ whiteSpace: 'nowrap' }}>{fmtAge(now - ms(d.createdAt))}</td>
-              <td><ApprovalBadge status="PENDING" /></td>
-              <td><Link className="btn btn-sm" to={`/incidents/${t.id}`} onClick={(e) => e.stopPropagation()}>Review<ArrowRight size={14} aria-hidden /></Link></td>
+              <td><Link className="btn btn-sm btn-primary" to={`/incidents/${t.id}`} onClick={(e) => e.stopPropagation()}>Review &amp; decide<ArrowRight size={14} aria-hidden /></Link></td>
             </tr>); })}</tbody>
         </table></div>
       )}

@@ -5,7 +5,7 @@ import { useStore } from '../app/store';
 import { ISSUE_LABEL } from '../domain/catalog';
 import { opportunities } from '../domain/insights';
 import { fmtMin } from '../domain/metrics';
-import type { IssueType, Knowledge } from '../domain/types';
+import type { Knowledge } from '../domain/types';
 import { Empty, Modal, fmtShort } from '../components/ui';
 
 const K_STATUS: Record<Knowledge['status'], { cls: string; label: string }> = { VALIDATED: { cls: 'b-success', label: 'Validated — used by AI' }, PENDING_VALIDATION: { cls: 'b-warning', label: 'Waiting for validation' }, REJECTED: { cls: 'b-outline', label: 'Rejected' } };
@@ -16,27 +16,31 @@ export function OpportunitiesPage() {
   const now = useStore((s) => s.now);
   const dispatch = useStore((s) => s.dispatch);
   const ops = useMemo(() => opportunities(state, now), [state, now]);
+  const maxEffort = Math.max(1, ...ops.map((o) => o.effortMin));
+  const unsupportedTotal = ops.reduce((a, o) => a + o.tickets.length, 0);
   const [review, setReview] = useState<Knowledge | null>(null);
   const [reason, setReason] = useState('');
   return (
     <div>
-      <div className="page-head"><div><h1>Opportunities</h1><p>Recurring incidents AI couldn’t resolve, and the validated human fixes that teach it. Nothing is learned or executed until an administrator validates it.</p></div></div>
-      <h2><Lightbulb size={16} aria-hidden /> Where AI can’t help yet</h2>
+      <div className="page-head"><div><h1>Opportunities</h1><p>Where teaching AI saves the most admin time, and the validated human fixes that teach it. Nothing is learned or executed until an administrator validates it.</p></div></div>
+      <h2><Lightbulb size={16} aria-hidden /> What to teach AI first</h2>
+      <p className="small muted" style={{ marginTop: 0 }}>Incidents AI couldn’t help with (the same {unsupportedTotal} counted in the Overview’s unsupported rate), grouped by issue and ranked by <strong>manual handling effort = how often it happens × admin minutes each time</strong>. Teaching AI one of these means: resolve an incident manually, save the fix as a reusable resolution, then validate it.</p>
       {ops.length === 0 ? <div className="card"><Empty title="No unsupported incidents" /></div> : (
         <div className="table-wrap"><table className="data" data-testid="opportunities">
-          <thead><tr><th>Issue category</th><th className="num">Occurrences</th><th>Related incidents</th><th>Frequency</th><th className="num">Est. admin effort</th><th>Knowledge</th><th>Recommended next action</th></tr></thead>
+          <thead><tr><th>Priority</th><th>Issue</th><th className="num">Incidents</th><th className="num">Manual effort</th><th className="num">Saving once taught</th><th>Knowledge</th><th>Next step</th></tr></thead>
           <tbody>{ops.map((o) => (
-            <tr key={o.key}>
-              <td><strong>{ISSUE_LABEL[o.key as IssueType]}</strong></td>
-              <td className="num"><Link to={`/incidents?metric=everUnsupported&issue=${o.key}`}>{o.tickets.length}</Link>{o.open ? <div className="small muted">{o.open} open</div> : null}</td>
-              <td className="small">{o.tickets.slice(0, 3).map((t) => <div key={t.id}><Link to={`/incidents/${t.id}`}>{t.displayId}</Link> {t.title}</div>)}</td>
-              <td className="small">{o.last7} in last 7 days{o.prior ? ` · ${o.prior} earlier` : ''}</td>
-              <td className="num">{fmtMin(o.effortMin)}</td>
+            <tr key={o.key} data-testid={`opp-${o.key}`}>
+              <td><span className={`rank${o.covered ? ' done' : ''}`}>{o.rank}</span></td>
+              <td><strong>{ISSUE_LABEL[o.key]}</strong><div className="small">{o.tickets.slice(0, 3).map((t, i) => <span key={t.id}>{i ? ', ' : ''}<Link to={`/incidents/${t.id}`}>{t.displayId}</Link></span>)} <span className="muted">· e.g. “{o.tickets[0].title}”</span></div></td>
+              <td className="num"><Link to={`/incidents?metric=everUnsupported&issue=${o.key}`}>{o.tickets.length}</Link><div className="small muted">{o.open} open · {o.last7} in last 7 days</div></td>
+              <td className="num"><strong>{fmtMin(o.effortMin)}</strong><div className="small muted">{o.tickets.length} × ~{o.avgMin} min</div><span className="effort-bar" style={{ width: `${Math.max(8, (o.effortMin / maxEffort) * 100)}%`, opacity: o.covered ? 0.35 : 1 }} aria-hidden /></td>
+              <td className="num">{o.covered ? <span className="muted">—</span> : <>~{fmtMin(o.savingPerIncident)}<div className="small muted">per future incident</div></>}</td>
               <td className="small">{o.knowledge.length ? o.knowledge.map((k) => <div key={k.id}><span className={`badge ${K_STATUS[k.status as Knowledge['status']].cls}`}>{k.id}</span> {K_STATUS[k.status as Knowledge['status']].label}</div>) : <span className="muted">None yet</span>}</td>
-              <td className="small">{o.next.knowledgeId ? <button className="btn btn-sm btn-primary" onClick={() => { setReason(''); setReview(state.knowledge.find((k) => k.id === o.next.knowledgeId) ?? null); }}>{o.next.text}</button> : o.next.ticketId ? <Link className="btn btn-sm" to={`/incidents/${o.next.ticketId}`}>{o.next.text}</Link> : o.next.text}</td>
+              <td className="small">{o.next.knowledgeId ? <button className="btn btn-sm btn-primary" onClick={() => { setReason(''); setReview(state.knowledge.find((k) => k.id === o.next.knowledgeId) ?? null); }}>{o.next.text}</button> : o.next.ticketId ? <Link className="btn btn-sm" to={`/incidents/${o.next.ticketId}`}>{o.next.text}</Link> : <span className="muted">{o.next.text}</span>}</td>
             </tr>))}</tbody>
         </table></div>
       )}
+      <p className="small muted">Manual effort = admin minutes actually spent on resolved incidents + the manual baseline for open ones (estimates; baselines are in AI Settings). Saving once taught = baseline − {state.settings.reviewEffortMin} min admin review, because a taught fix still needs approval.</p>
       <h2 style={{ marginTop: 24 }}><BookCheck size={16} aria-hidden /> Reusable resolutions</h2>
       <div className="table-wrap"><table className="data" data-testid="knowledge">
         <thead><tr><th>ID</th><th>Title</th><th>From incident</th><th>Status</th><th>Created</th><th /></tr></thead>

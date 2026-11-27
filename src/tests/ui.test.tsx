@@ -43,6 +43,6 @@ describe('UI', () => {
   it('AI settings show approval and verification as always on', () => {
     setRole('ADMIN');
     renderAt('/settings');
-    expect(screen.getAllByText('Always on')).toHaveLength(2);
+    expect(screen.getAllByText('Always on')).toHaveLength(3);
   });
 });

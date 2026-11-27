@@ -1,14 +1,14 @@
 import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { AlertTriangle, Bot, CheckCircle2, ChevronRight, CircleHelp, History, Loader2, MessageSquare, RefreshCw, Search, ShieldCheck, Undo2, Wrench, XCircle } from 'lucide-react';
+import { AlertTriangle, Bot, CheckCircle2, ChevronRight, Circle, CircleHelp, History, Loader2, MessageSquare, MinusCircle, Radar, RefreshCw, Search, ShieldCheck, Undo2, Wrench, XCircle } from 'lucide-react';
 import { useStore } from '../app/store';
-import { ISSUE_LABEL, employeeById } from '../domain/catalog';
+import { CATEGORY_LABEL, ISSUE_LABEL, employeeById } from '../domain/catalog';
 import { currentDiagnosis, deviceFieldLabel, gatesFor, latestAppliedExecution, runbookOf } from '../domain/engine';
-import { HIST_LABEL, similarIncidents } from '../domain/insights';
+import { HIST_LABEL, HIST_ORDER, HIST_SHORT, fixTrackRecord, similarIncidents } from '../domain/insights';
 import { approvalStatus, productStatus } from '../domain/lifecycle';
 import { fmtAge, savedForTicket, fmtMin } from '../domain/metrics';
 import { preflight } from '../domain/preflight';
-import type { AppState, Ticket } from '../domain/types';
+import type { AppState, Diagnosis, Ticket } from '../domain/types';
 import { ApprovalBadge, ConfidenceBadge, DisabledReason, MethodBadge, Modal, ResultIcon, RiskBadge, SlaBadge, StatusBadge, fmtShort, fmtTime } from '../components/ui';
 import { NotFoundPage } from './NotFound';
 
@@ -19,6 +19,46 @@ function rollbackInfo(s: AppState, t: Ticket, now: number) {
   if (!e.rollbackDeadline || Date.parse(e.rollbackDeadline) <= now) return { available: false as const, e, reason: 'The 30-minute rollback window has passed' };
   return { available: true as const, e };
 }
+type StepState = 'done' | 'current' | 'skipped' | 'pending' | 'warn';
+interface DetectStep { title: string; text: React.ReactNode; state: StepState }
+const STEP_ICON: Record<StepState, React.ReactNode> = {
+  done: <CheckCircle2 size={16} color="var(--success)" aria-label="Done" />, warn: <AlertTriangle size={16} color="var(--warning)" aria-label="Needs attention" />,
+  current: <Loader2 size={16} className="spin-slow" color="var(--accent)" aria-label="In progress" />, skipped: <MinusCircle size={16} color="var(--muted)" aria-label="Not needed" />, pending: <Circle size={16} color="var(--muted)" aria-label="Not yet" />,
+};
+
+/** How AI identified the incident after it was reported — every line comes from the ticket and diagnosis record. */
+function detectionSteps(s: AppState, t: Ticket, d: Diagnosis | undefined, reason: string | undefined): DetectStep[] {
+  const emp = employeeById(t.employeeId);
+  const ts = t.troubleshooting;
+  const q = ts.entries.filter((e) => e.kind === 'QUESTION').length, st = ts.entries.filter((e) => e.kind !== 'QUESTION').length;
+  const kStart = ts.knowledgeId ? s.knowledge.find((k) => k.id === ts.knowledgeId) : undefined;
+  const selfFixed = ts.state === 'RESOLVED';
+  const steps: DetectStep[] = [
+    { title: 'Reported by the employee', state: 'done', text: <>{emp.name} chose “{ISSUE_LABEL[t.issueType]}” and wrote “{t.description}”</> },
+    { title: 'Classified', state: 'done', text: <>Classified as <strong>{CATEGORY_LABEL[t.category]}</strong> from the selected issue type — this picks the guided troubleshooting path{kStart ? <> and adds the steps of validated resolution <strong>{kStart.id}</strong>, which matched the description</> : ''}.</> },
+    { title: 'Guided troubleshooting with the employee', state: ts.state === 'ACTIVE' ? 'current' : selfFixed ? 'done' : 'warn',
+      text: <>{q} question{q === 1 ? '' : 's'}{st ? ` and ${st} step${st === 1 ? '' : 's'}` : ''}{ts.findings.length ? <> · findings: {ts.findings.slice(0, 3).join('; ')}</> : ''}. {ts.state === 'ACTIVE' ? 'In progress.' : selfFixed ? 'The employee confirmed it is fixed.' : <>Sent to IT: {ts.escalationReason}.</>}</> },
+  ];
+  if (selfFixed && !d) {
+    steps.push({ title: 'Laptop health check', state: 'skipped', text: 'Not needed — fixed by the employee.' });
+    steps.push({ title: 'Matched to a fix', state: 'skipped', text: 'Not needed — no IT action was required.' });
+    return steps;
+  }
+  if (!d) {
+    steps.push({ title: 'Laptop health check', state: 'pending', text: 'Runs when the ticket reaches IT.' });
+    steps.push({ title: 'Matched to a fix', state: 'pending', text: 'AI compares the answers and health data with approved fixes and validated resolutions.' });
+    return steps;
+  }
+  steps.push(d.match?.kind === 'KNOWLEDGE' && !d.telemetry
+    ? { title: 'Laptop health check', state: 'skipped', text: 'Not used — a validated resolution matched the reported pattern first.' }
+    : { title: 'Laptop health check', state: d.telemetry?.consistent === false ? 'warn' : 'done', text: <>{d.telemetry?.text ?? d.evidence[0]}{d.telemetry ? (d.telemetry.consistent ? ' — confirms the report.' : ' — does not confirm the report, so confidence is lowered.') : ''}</> });
+  const m = d.match;
+  const matched = m?.kind === 'KNOWLEDGE' ? <>Matched validated resolution <strong>{m.id}</strong> “{m.title}”</> : m?.kind === 'RUNBOOK' ? <>Matched approved fix “{m.title}”</> : <>No approved fix or validated resolution matches</>;
+  steps.push({ title: 'Matched to a fix', state: d.recommendable ? 'done' : 'warn',
+    text: <>{matched}. Diagnosis confidence {d.confidence}% vs threshold {s.settings.confidenceThreshold}% → {d.recommendable ? <strong>recommended for admin approval</strong> : <strong>not recommended{reason ? ` — ${reason.replace(/\.$/, '')}` : ''}</strong>}.</> });
+  return steps;
+}
+
 const lines = (x: string) => x.split('\n').map((l) => l.trim()).filter(Boolean);
 
 /** Administrator incident view (V1.2 §8–11): what the employee tried, what AI proposes, and the decision. */
@@ -49,6 +89,9 @@ export function IncidentDetailPage() {
   const kn = d?.knowledgeId ? state.knowledge.find((k) => k.id === d.knowledgeId) : undefined;
   const pf = preflight(state, t.id, now, { execution: exec && ['RUNNING', 'VERIFYING'].includes(exec.phase) ? exec : undefined });
   const recommends = !!(rb && d?.recommendable);
+  const track = fixTrackRecord(state, rb?.id ?? d?.runbookId, t.id);
+  const lastFail = track.runs.find((r) => r.result === 'FAILED');
+  const steps = detectionSteps(state, t, d, g.reasons[0]);
   const run = (a: Parameters<typeof dispatch>[0]) => { if (busy) return; setBusy(true); const r = dispatch(a); setTimeout(() => setBusy(false), 200); return r; };
   const canResolve = ['REVIEW_REQUIRED', 'ESCALATED', 'REOPENED'].includes(t.status);
   const canInvestigate = ['REVIEW_REQUIRED', 'REOPENED', 'ROLLBACK_AVAILABLE', 'AWAITING_CONSENT'].includes(t.status) || (t.status === 'ESCALATED' && !t.investigation);
@@ -79,14 +122,6 @@ export function IncidentDetailPage() {
 
       <div className="split">
         <div className="stack-16">
-          <section className="card stack" aria-label="Employee troubleshooting">
-            <h2><MessageSquare size={16} aria-hidden />Employee troubleshooting</h2>
-            {ts.entries.length === 0 ? <p className="muted">No guided troubleshooting yet.</p> : <>
-              <p className="small">{ts.state === 'RESOLVED' ? 'Resolved by the employee with guided troubleshooting.' : ts.state === 'ESCALATED' ? <>Escalated to IT: <strong>{ts.escalationReason}</strong>. No need to repeat these steps.</> : 'Troubleshooting in progress.'}</p>
-              <ol className="history">{ts.entries.map((e, i) => <li key={i}><span className="small muted">{e.kind === 'QUESTION' ? 'Q' : e.kind === 'STEP' ? 'Step' : 'Check'}</span><span>{e.text}</span><span className={`badge ${e.answer === 'RESOLVED' || e.answer === 'COMPLETED' ? 'b-success' : e.answer === 'PERSISTS' || e.answer === 'UNABLE' ? 'b-danger' : 'b-neutral'}`}>{e.answerLabel}</span></li>)}</ol>
-            </>}
-          </section>
-
           {!d && (t.status === 'REOPENED' || t.status === 'OPEN') && (
             <section className="card action-card stack" aria-label="Next action" id="action-card">
               <h2><Bot size={16} aria-hidden />AI assessment</h2>
@@ -100,20 +135,23 @@ export function IncidentDetailPage() {
           )}
           {d && (
             <section className="card action-card stack" aria-label="AI recommendation" id="action-card">
-              <div className="row-between"><h2><Bot size={16} aria-hidden />{recommends ? 'AI recommendation' : 'AI assessment'}</h2>
-                <span className="row small">Confidence <ConfidenceBadge value={d.confidence} threshold={state.settings.confidenceThreshold} /><span className="muted">threshold {state.settings.confidenceThreshold}% · simulated</span></span></div>
-              <dl className="kv">
-                <dt>{recommends ? 'Root cause' : 'Suspected cause'}</dt><dd>{d.rootCause}</dd>
-                {recommends && rb && <>
-                  <dt>Proposed fix</dt><dd><strong>{rb.title}</strong>{kn && <span className="badge b-outline" style={{ marginLeft: 6 }}>From validated resolution {kn.id}</span>}<ol className="small" style={{ margin: '4px 0 0', paddingLeft: 18 }}>{rb.steps.map((s) => <li key={s.id}>{s.description}</li>)}</ol></dd>
-                  <dt>Why AI recommends it</dt><dd><ul className="small" style={{ margin: 0, paddingLeft: 18 }}>{d.evidence.slice(0, 3).map((x) => <li key={x}>{x}</li>)}{sim.resolvedCount > 0 && <li>{sim.fixed} of {sim.resolvedCount} similar past incidents were fixed through AI-assisted paths</li>}</ul></dd>
-                  <dt>Expected duration</dt><dd>~{rb.expectedMin} min</dd>
-                  <dt>Employee impact</dt><dd>{rb.employeeImpact}{g.needsConsent ? ' · the employee is asked to agree first' : ''}</dd>
-                  <dt>Expected outcome</dt><dd>{rb.expectedOutcome} — verified by: {rb.checks.join('; ')}</dd>
-                  <dt>Risk</dt><dd><RiskBadge risk={d.risk} /></dd>
-                  <dt>Rollback</dt><dd>{rb.reversible ? <>Available for 30 min: {rb.rollbackSteps.join('; ')}</> : <span className="warn-text"><AlertTriangle size={13} aria-hidden /> Not reversible — {rb.recoveryNote}</span>}</dd>
-                </>}
-              </dl>
+              <h2><Bot size={16} aria-hidden />{recommends ? 'AI recommendation' : 'AI assessment'}</h2>
+              {recommends && rb ? <>
+                <div className="decision-head">
+                  <div className="small muted">Proposed fix for {dev.name} · {emp.name}</div>
+                  <div className="decision-title">{rb.title}{kn && <span className="badge b-outline" style={{ marginLeft: 8 }}>From validated resolution {kn.id}</span>}</div>
+                  <div className="small">Cause: {d.rootCause}</div>
+                </div>
+                <div className="decision-grid" data-testid="decision-summary">
+                  <div><span className="dg-label">Diagnosis confidence</span><span className="dg-value"><ConfidenceBadge value={d.confidence} threshold={state.settings.confidenceThreshold} /></span><span className="dg-sub">How sure AI is about the cause · threshold {state.settings.confidenceThreshold}% · simulated</span></div>
+                  <div data-testid="track-record"><span className="dg-label">Fix track record</span><span className="dg-value">{track.finished ? <>{track.verified} of {track.finished} verified</> : 'First use'}</span><span className="dg-sub">{track.finished ? <>Previous admin-approved runs of this exact fix{track.failed ? <> · <span className="warn-text">{track.failed} failed</span></> : ''}</> : 'This fix has not run before'}</span></div>
+                  <div><span className="dg-label">Risk &amp; rollback</span><span className="dg-value"><RiskBadge risk={d.risk} /></span><span className="dg-sub">{rb.reversible ? 'Can be rolled back for 30 min' : <span className="warn-text">Not reversible</span>}</span></div>
+                  <div><span className="dg-label">Employee impact</span><span className="dg-value small">~{rb.expectedMin} min</span><span className="dg-sub">{rb.employeeImpact}{g.needsConsent ? ' · employee agrees first' : ''}</span></div>
+                </div>
+                {lastFail && <p className="small warn-text" style={{ margin: 0 }}><AlertTriangle size={13} aria-hidden /> Last failure: <Link to={`/incidents/${lastFail.ticket.id}`}>{lastFail.ticket.displayId}</Link> — {lastFail.reason ?? 'verification failed'}{lastFail.rolledBack ? ' → rolled back' : ''}.</p>}
+              </> : (
+                <dl className="kv"><dt>Suspected cause</dt><dd>{d.rootCause}</dd><dt>Diagnosis confidence</dt><dd><ConfidenceBadge value={d.confidence} threshold={state.settings.confidenceThreshold} /> <span className="small muted">threshold {state.settings.confidenceThreshold}% · simulated</span></dd></dl>
+              )}
               {!recommends && ps !== 'CLOSED' && <div className="banner warn" style={{ margin: 0 }}><CircleHelp size={16} aria-hidden /><div>{g.reasons[0]}.<ul className="small" style={{ margin: '4px 0 0', paddingLeft: 18 }}>{d.uncertainty.filter((u) => !u.startsWith('Confidence is simulated')).map((u) => <li key={u}>{u}</li>)}</ul></div></div>}
 
               {t.status === 'AWAITING_APPROVAL' && (
@@ -126,6 +164,17 @@ export function IncidentDetailPage() {
                   <p className="small muted" style={{ margin: 0 }}>Every AI-executed fix needs your explicit approval — high confidence never bypasses it. Approval applies only to this incident, {dev.name} and this exact fix; if the proposal changes, the approval is invalidated.</p>
                 </div>
               )}
+              {recommends && rb && (
+                <details className="disclosure" data-testid="rec-details"><summary>Full details — steps, evidence, verification, rollback, track record</summary>
+                  <dl className="kv" style={{ marginTop: 8 }}>
+                    <dt>Steps</dt><dd><ol className="small" style={{ margin: 0, paddingLeft: 18 }}>{rb.steps.map((x) => <li key={x.id}>{x.description}</li>)}</ol></dd>
+                    <dt>Evidence for the diagnosis</dt><dd><ul className="small" style={{ margin: 0, paddingLeft: 18 }}>{d.evidence.map((x) => <li key={x}>{x}</li>)}</ul></dd>
+                    <dt>Verified by</dt><dd>{rb.expectedOutcome} — {rb.checks.join('; ')}</dd>
+                    <dt>Rollback</dt><dd>{rb.reversible ? <>Available for 30 min: {rb.rollbackSteps.join('; ')}</> : <span className="warn-text"><AlertTriangle size={13} aria-hidden /> Not reversible — {rb.recoveryNote}</span>}</dd>
+                    <dt>Track record</dt><dd>{track.runs.length === 0 ? 'No previous runs.' : <ul className="clean small">{track.runs.map((r) => <li key={r.execution.id}><Link to={`/incidents/${r.ticket.id}`}>{r.ticket.displayId}</Link> {r.result === 'VERIFIED' ? 'verified' : r.result === 'FAILED' ? <span className="warn-text">failed verification{r.rolledBack ? ' → rolled back' : ''}</span> : 'still running'} · approved by {r.execution.approvedBy}, {fmtShort(r.execution.startedAt)}</li>)}</ul>}</dd>
+                  </dl>
+                </details>
+              )}
               {ps === 'REMEDIATION' && <div className="banner" style={{ margin: 0 }}><Loader2 size={16} className="spin-slow" aria-hidden /><div>{t.status === 'AWAITING_CONSENT' ? 'Approved — waiting for the employee to agree (disruptive fix).' : t.status === 'WAITING_DEVICE' ? g.reasons[0] : 'Approved — AI is executing and will verify the result before closing.'}</div></div>}
               {rbInfo.available && <div className="row"><button className="btn btn-danger-solid" data-testid="rollback" disabled={busy} onClick={() => run({ type: 'ROLLBACK', ticketId: t.id })}><Undo2 size={16} aria-hidden />Roll back</button><span className="small muted">Restores only what this fix changed. A rollback is not a resolution.</span></div>}
               {t.status === 'ROLLBACK_AVAILABLE' && !rbInfo.available && <DisabledReason reason={rbInfo.reason} />}
@@ -137,6 +186,18 @@ export function IncidentDetailPage() {
               {t.investigation && t.status !== 'CLOSED' && <p className="small"><Wrench size={13} aria-hidden /> Manual investigation: {t.investigation.reason} <span className="muted">({t.investigation.by}, {fmtShort(t.investigation.at)})</span></p>}
             </section>
           )}
+
+          <section className="card stack" aria-label="How AI identified this incident" data-testid="detection">
+            <h2><Radar size={16} aria-hidden />How AI identified this incident</h2>
+            <ol className="detect-steps">{steps.map((x) => <li key={x.title} data-state={x.state}>{STEP_ICON[x.state]}<div><strong>{x.title}</strong><div className="small">{x.text}</div></div></li>)}</ol>
+          </section>
+          <section className="card stack" aria-label="Employee troubleshooting">
+            <h2><MessageSquare size={16} aria-hidden />Employee troubleshooting</h2>
+            {ts.entries.length === 0 ? <p className="muted">No guided troubleshooting yet.</p> : <>
+              <p className="small">{ts.state === 'RESOLVED' ? 'Resolved by the employee with guided troubleshooting.' : ts.state === 'ESCALATED' ? <>Escalated to IT: <strong>{ts.escalationReason}</strong>. No need to repeat these steps.</> : 'Troubleshooting in progress.'}</p>
+              <ol className="history">{ts.entries.map((e, i) => <li key={i}><span className="small muted">{e.kind === 'QUESTION' ? 'Q' : e.kind === 'STEP' ? 'Step' : 'Check'}</span><span>{e.text}</span><span className={`badge ${e.answer === 'RESOLVED' || e.answer === 'COMPLETED' ? 'b-success' : e.answer === 'PERSISTS' || e.answer === 'UNABLE' ? 'b-danger' : 'b-neutral'}`}>{e.answerLabel}</span></li>)}</ol>
+            </>}
+          </section>
 
           {exec && (
             <section className="card stack" aria-label="Execution">
@@ -161,9 +222,13 @@ export function IncidentDetailPage() {
         </div>
 
         <div className="stack-16">
-          <section className="card stack" aria-label="Historical incidents"><h2><History size={16} aria-hidden />Similar past incidents</h2>
-            {sim.items.length === 0 ? <p className="small muted">No similar incidents on record.</p> : <ul className="clean small">{sim.items.map((x) => <li key={x.ticket.id}><ChevronRight size={14} aria-hidden /><span><Link to={`/incidents/${x.ticket.id}`}>{x.ticket.displayId}</Link> {x.ticket.title} — <span className={x.outcome.startsWith('FAILED') ? 'warn-text' : ''}>{HIST_LABEL[x.outcome]}</span>{x.failReason ? ` (${x.failReason})` : ''}</span></li>)}</ul>}
-            {sim.failures.length > 0 && <p className="small warn-text"><AlertTriangle size={13} aria-hidden /> {sim.failures.length} similar AI fix{sim.failures.length > 1 ? 'es' : ''} failed before — check the reason above.</p>}
+          <section className="card stack" aria-label="Similar incidents" data-testid="similar">
+            <h2><History size={16} aria-hidden />Similar incidents</h2>
+            {sim.items.length === 0 ? <p className="small muted">No other {CATEGORY_LABEL[t.category]} incidents on record.</p> : <>
+              <p className="small" data-testid="similar-summary"><strong>{sim.total} other {CATEGORY_LABEL[t.category]} incident{sim.total === 1 ? '' : 's'}:</strong> {HIST_ORDER.filter((k) => sim.counts[k]).map((k) => `${sim.counts[k]} ${HIST_SHORT[k]}`).join(' · ')}</p>
+              <ul className="clean small">{sim.items.map((x) => <li key={x.ticket.id}><ChevronRight size={14} aria-hidden /><span><Link to={`/incidents/${x.ticket.id}`}>{x.ticket.displayId}</Link> {x.ticket.title} — <span className={x.outcome.startsWith('FAILED') ? 'warn-text' : ''}>{HIST_LABEL[x.outcome]}</span>{x.later ? `, ${x.later}` : ''}</span></li>)}</ul>
+              <p className="small muted" style={{ margin: 0 }}>Same issue category, any route to resolution — context for the admin, not the success rate of the proposed fix (see Fix track record).</p>
+            </>}
           </section>
           <section className="card stack" aria-label="Activity"><h2>Activity</h2>
             <ol className="timeline">{audit.slice(0, 8).map((a) => <li key={a.id}><span className={`tdot ${a.result}`} aria-hidden /><div><div className="row" style={{ gap: 6 }}><strong className="small">{a.action.replace(/_/g, ' ').toLowerCase()}</strong><ResultIcon result={a.result} /></div><div className="small">{a.reason}</div><div className="small muted">{fmtTime(a.at)} · {a.actor}</div></div></li>)}</ol>
@@ -177,11 +242,11 @@ export function IncidentDetailPage() {
           <dl className="kv">
             <dt>Incident · device</dt><dd>{t.displayId} · {dev.name} ({emp.name})</dd>
             <dt>Action</dt><dd>{rb.title}</dd>
-            <dt>Confidence</dt><dd>{d.confidence}% (simulated, threshold {state.settings.confidenceThreshold}%)</dd>
+            <dt>Diagnosis confidence</dt><dd>{d.confidence}% that the cause is right (simulated, threshold {state.settings.confidenceThreshold}%)</dd>
+            <dt>Fix track record</dt><dd>{track.finished ? `${track.verified} of ${track.finished} previous runs verified` : 'First use — no previous runs'}</dd>
             <dt>Risk &amp; impact</dt><dd><RiskBadge risk={d.risk} /> {rb.employeeImpact}</dd>
             <dt>Employee consent</dt><dd>{g.needsConsent ? 'Required — the employee is asked before it starts' : 'Not needed'}</dd>
             <dt>Rollback</dt><dd>{rb.reversible ? rb.rollbackSteps.join('; ') : <strong className="warn-text">Not reversible — {rb.recoveryNote}</strong>}</dd>
-            {sim.failures.length > 0 && <><dt>History</dt><dd className="warn-text">{sim.failures.length} similar AI fix(es) failed before</dd></>}
           </dl>
           <p className="small muted">Prerequisites (laptop online, compatible, battery, consent) are re-checked right before execution — approval never overrides them.</p>
           <label className="check"><input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} data-testid="ack" />I have reviewed the proposed action and its risks.</label>

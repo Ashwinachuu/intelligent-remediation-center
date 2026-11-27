@@ -57,7 +57,7 @@ The first command creates a preview deployment. The second promotes to productio
 
 ## 2. Architecture
 
-* **React 18 + TypeScript + Vite**, a **Zustand** store, **Recharts** and plain CSS. State persists in `localStorage` (`remediation-center:v1`, schema v5). Older or unreadable saved data quietly reloads the demo seed.
+* **React 18 + TypeScript + Vite**, a **Zustand** store, **Recharts** and plain CSS. State persists in `localStorage` (`remediation-center:v1`, schema v6). Older or unreadable saved data quietly reloads the demo seed.
 * **Pure domain engine** (`src/domain/`). Every change goes through `applyAction(state, action, now)`. It checks role authorization and the transition table, and writes an audit entry for each state change. The UI holds no business logic.
 
 | File | Responsibility |
@@ -83,14 +83,14 @@ The first command creates a preview deployment. The second promotes to productio
 
 **IT Admin:**
 
-* **Overview:** date presets (Today, 7, 30 or 90 days, or custom) and an issue filter. A KPI row reconciles to the total. Four success questions: AI-assisted rate, self-service rate, unsupported rate (still open versus since resolved) and estimated admin time saved (with a formula tooltip). Charts: resolved per day, status distribution, AI versus manual, unsupported trend, turnaround, reopen rate and SLA compliance. Every number drills down to the matching incident list.
+* **Overview:** date presets (Today, 7, 30 or 90 days, or custom) and an issue filter. A KPI row, plus an outcome equation and bar where every incident is counted exactly once (*reported = self-service + human-approved AI + manual + still open*). The success metrics are shown as fractions whose every term links to the incidents it counts: AI-assisted rate, self-service rate (the part of AI-assisted needing no admin), and unsupported rate. Unsupported is a separate lens that cuts across outcomes, with an exhaustive breakdown of where those incidents are now (still unsupported, in manual investigation, resolved manually…) that always adds up. Estimated admin time saved has its formula alongside. Charts: resolved per day, status distribution, AI versus manual, unsupported trend, turnaround, reopen rate and SLA compliance. Every number drills down to the matching incident list.
 * **My Workspace:** 5 clickable KPI tiles. The queue defaults to *All action required*, and the chips filter by Pending approval, Human investigation and Overdue. Each row says why it is there.
 * **Incidents:** filter by status, approval, method, issue, overdue, date and metric.
-* **Incident detail:** the employee's troubleshooting history; the AI recommendation (root cause, confidence, steps, impact and risks); **Approve & Execute / Reject Recommendation / Investigate Manually**; live execution and verification; rollback; manual resolution with *save as reusable resolution*; similar incidents; and activity.
-* **Approvals:** pending recommendations, with no duplicates; the queue updates immediately.
-* **Opportunities:** recurring and unsupported issue groups with the next action, plus the reusable resolutions awaiting validation (validate or reject).
+* **Incident detail:** a decision summary first: the proposed fix plus four tiles. **Diagnosis confidence** says how sure AI is about the cause. **Fix track record** says how often admin-approved runs of this exact fix were verified before. Risk & rollback and employee impact complete the four, with the last failure flagged. Full details sit behind one click. Below that, **How AI identified this incident** shows report → classification → guided troubleshooting → laptop health check → match and decision. Then the employee's troubleshooting history; **Approve & Execute / Reject Recommendation / Investigate Manually**; live execution and verification; rollback; manual resolution with *save as reusable resolution*; similar incidents (same category, any route, with a summary that counts exactly the listed incidents and is explicitly *not* the fix's success rate); and activity.
+* **Approvals:** pending recommendations laid out for a fast decision: proposed fix, diagnosis confidence, fix track record, risk & rollback, impact and waiting time. No duplicates; the queue updates immediately.
+* **Opportunities:** *What to teach AI first.* Unsupported incidents (the same cohort as the Overview rate) are grouped by issue and ranked by manual handling effort (frequency × admin minutes), with the estimated saving per future incident once taught. Issues already taught drop to the bottom. The next step reuses the validated-resolution workflow: save the manual fix, then validate it.
 * **Audit Logs:** filterable, append-only, and exportable as CSV (with injection-safe cells).
-* **AI Settings:** confidence threshold (default 80%, labeled a prototype assumption), troubleshooting attempts, employee consent, and time-saving baselines. Approval and verification are **Always on**. Every change is versioned with a reason.
+* **AI Settings:** two groups. *AI behavior you can tune*: confidence threshold (default 80%, labeled a prototype assumption), troubleshooting attempts, employee consent and approval expiry. *Safety controls that are always on*: human approval, verification and prerequisite checks. Time-saving baselines sit in a collapsed *Reporting assumptions* section because they never change AI behavior. Every change is versioned with a reason.
 
 ## 4. Demo walkthrough (about 7 minutes)
 
@@ -108,11 +108,11 @@ Also worth showing: **Reject** from Approvals (nothing executes); raising the th
 
 | Suite | Count | Covers |
 |---|---|---|
-| `src/tests/v12.test.ts` (Vitest) | 23 | Adaptive branching, self-service closure, escalation with history, attempt limit, network-wide → unsupported, no execution without approval, approval permissions/ack/duplicates, plan binding and invalidation, threshold, consent, failed verification and rollback, irreversible fixes, the knowledge lifecycle and retrieval, reopen, metric reconciliation and formulas, time saved, date filters, workspace filters, no autonomous history, corrupt storage, CSV injection |
+| `src/tests/v12.test.ts` (Vitest) | 25 | Adaptive branching, self-service closure, escalation with history, attempt limit, network-wide → unsupported, no execution without approval, approval permissions/ack/duplicates, plan binding and invalidation, threshold, consent, failed verification and rollback, irreversible fixes, the knowledge lifecycle and retrieval, reopen, metric reconciliation and formulas, fix track record vs confidence, similar-incident summary consistency, the exhaustive unsupported breakdown, opportunity ranking, time saved, date filters, workspace filters, no autonomous history, corrupt storage, CSV injection |
 | `src/tests/ui.test.tsx` (Vitest + RTL) | 5 | Two roles only, first guided question, role guarding, workspace default, locked settings |
-| `e2e/flows.spec.ts` (Playwright) | 8 | Scenarios 1–5 end to end across both roles, reject flow, KPI drill-down reconciliation plus settings and audit filters, every route for both roles, and no horizontal overflow at 375px. Each test also fails on any console error |
+| `e2e/flows.spec.ts` (Playwright) | 11 | Scenarios 1–5 end to end across both roles, reject flow, KPI drill-down reconciliation plus settings and audit filters, on-screen evidence and metric consistency (track record, similar summary, unsupported breakdown, opportunity ranking, settings grouping), two-tab sync, the phone navigation drawer, every route for both roles, and no horizontal overflow at 375px. Each test also fails on any console error |
 
-Typecheck and lint are clean, all 36 tests pass, and the build succeeds.
+Typecheck and lint are clean, all 41 tests pass, and the build succeeds.
 
 ## 6. Limitations
 

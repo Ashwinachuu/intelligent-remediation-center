@@ -22,6 +22,7 @@ export function computeDiagnosis(s: AppState, t: Ticket, device: Device, setting
   let runbook: Runbook | undefined;
   let confidence: number;
   let rootCause: string;
+  let telemetry: Diagnosis['telemetry'];
   if (k) {
     runbook = s.runbooks.find((r) => r.knowledgeId === k.id && r.status === 'APPROVED');
     confidence = 85;
@@ -33,6 +34,7 @@ export function computeDiagnosis(s: AppState, t: Ticket, device: Device, setting
     confidence = DEFAULT_SCORE[t.category];
     rootCause = runbook?.rootCause ?? 'Unknown — no known pattern matches this issue';
     evidence.push(tf.evidence);
+    telemetry = { text: tf.evidence, consistent: tf.consistent };
     if (!tf.consistent) { confidence = 65; uncertainty.push('Telemetry does not confirm the reported problem'); }
   }
   if (ts.signals.includes('NETWORK_WIDE')) {
@@ -53,6 +55,7 @@ export function computeDiagnosis(s: AppState, t: Ticket, device: Device, setting
     id: uuid(), ticketId: t.id, revision, category: t.category, confidence, risk: runbook?.risk ?? 'HIGH', rootCause, evidence, uncertainty,
     runbookId: runbook?.id, runbookVersion: runbook?.version, knowledgeId: k?.id,
     planHash: planHashOf({ ticketId: t.id, deviceId: device.id, revision, runbookId: runbook?.id, runbookVersion: runbook?.version, threshold: settings.confidenceThreshold }),
-    settingsVersion: settings.version, createdAt: nowIso, recommendable, reasons: [],
+    settingsVersion: settings.version, createdAt: nowIso, recommendable, reasons: [], telemetry,
+    match: k ? { kind: 'KNOWLEDGE', id: k.id, title: k.title } : runbook ? { kind: 'RUNBOOK', id: runbook.id, title: runbook.title } : { kind: 'NONE' },
   };
 }

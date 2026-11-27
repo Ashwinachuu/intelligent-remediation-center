@@ -1,5 +1,5 @@
 import type { AppState, IssueType, Path, ProductStatus, Ticket } from './types';
-import { productStatus } from './lifecycle';
+import { PRODUCT_STATUSES, PRODUCT_STATUS_LABEL, productStatus } from './lifecycle';
 import { slaState } from './insights';
 import { addDaysKey, daysBetweenInclusive, localDateKey, localDayStart, ms, ratio, HOUR } from './util';
 
@@ -27,6 +27,7 @@ export const METRIC_DEFS: Record<string, { label: string; predicate: string; tes
   everUnsupported: { label: 'Ever classified unsupported', predicate: 'AI could not provide a reliable recommendation at least once', test: (t) => t.everUnsupported },
   currentUnsupported: { label: 'Currently unsupported', predicate: 'Status = New / Unsupported', test: (t) => productStatus(t) === 'UNSUPPORTED' },
   unsupportedResolved: { label: 'Previously unsupported, now resolved', predicate: 'Ever unsupported AND currently Closed', test: (t) => t.everUnsupported && t.status === 'CLOSED' },
+  stillOpen: { label: 'Still open', predicate: 'Any state except Closed', test: (t) => t.status !== 'CLOSED' },
   closedVerified: { label: 'Verified resolutions', predicate: 'Closed and verified (any method)', test: (t) => t.status === 'CLOSED' && t.verified },
   reopened: { label: 'Reopened at least once', predicate: 'reopened count > 0', test: (t) => t.reopenedCount > 0 },
   actionRequired: { label: 'All action required', predicate: 'Review needed, New / Unsupported, Manual investigation or Reopened', test: (t) => ['REVIEW_NEEDED', 'UNSUPPORTED', 'MANUAL', 'REOPENED'].includes(productStatus(t)) },
@@ -81,6 +82,14 @@ export function dashboard(s: AppState, f: Filters) {
     { key: 'status_REOPENED', label: 'Reopened', count: n('status_REOPENED') },
     { key: 'status_OPEN', label: 'Open', count: n('status_OPEN') },
   ];
+  const RESOLVED_LABEL = { MANUAL: 'Resolved manually', HUMAN_APPROVED: 'Resolved by an approved AI fix (after teaching)', SELF_SERVICE: 'Resolved by employee self-service' };
+  // Unsupported is a separate lens across outcomes: every ever-unsupported incident falls in exactly one row here.
+  const eu = c.filter((t) => t.everUnsupported);
+  const unsupportedBreakdown: { key: string; label: string; count: number; extra: Record<string, string> }[] = [];
+  const addRow = (key: string, label: string, extra: Record<string, string>, test: (t: Ticket) => boolean) => { const count = eu.filter(test).length; if (count) unsupportedBreakdown.push({ key, label, count, extra }); };
+  addRow('s:UNSUPPORTED', 'Still new / unsupported', { status: 'UNSUPPORTED' }, (t) => productStatus(t) === 'UNSUPPORTED');
+  for (const ps of PRODUCT_STATUSES.filter((x) => x !== 'UNSUPPORTED' && x !== 'CLOSED')) addRow(`s:${ps}`, `Still open — ${PRODUCT_STATUS_LABEL[ps].toLowerCase()}`, { status: ps }, (t) => productStatus(t) === ps);
+  for (const m of ['MANUAL', 'HUMAN_APPROVED', 'SELF_SERVICE'] as const) addRow(`m:${m}`, RESOLVED_LABEL[m], { method: m }, (t) => t.status === 'CLOSED' && t.path === m);
   const everClosed = c.filter((t) => t.firstClosedAt);
   const now = Date.now();
   const met = c.filter((t) => slaState(t, now) === 'MET').length;
@@ -88,7 +97,7 @@ export function dashboard(s: AppState, f: Filters) {
   return {
     total, dist, distSum: dist.reduce((a, d) => a + d.count, 0),
     aiRate: ratio(ss + ha, total), ssRate: ratio(ss, total), aiCount: ss + ha, ssCount: ss,
-    unsupportedRate: ratio(n('everUnsupported'), total), everUnsupported: n('everUnsupported'), currentUnsupported: n('currentUnsupported'), unsupportedResolved: n('unsupportedResolved'),
+    unsupportedRate: ratio(n('everUnsupported'), total), everUnsupported: n('everUnsupported'), currentUnsupported: n('currentUnsupported'), unsupportedResolved: n('unsupportedResolved'), unsupportedBreakdown,
     saved: timeSaved(s, c),
     reopenRate: ratio(everClosed.filter((t) => t.reopenedCount > 0).length, everClosed.length), reopened: everClosed.filter((t) => t.reopenedCount > 0).length, everClosed: everClosed.length,
     slaCompliance: ratio(met, met + missed), slaMet: met, slaMissed: missed,
