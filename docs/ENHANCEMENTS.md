@@ -1,5 +1,7 @@
 # Product Experience & Trust Enhancements — Implemented Specification
 
+> **Superseded in part by [V1.2](V1.2.md).** Workspace, correlation, draft runbooks, business impact and automation maturity below describe V1.1; V1.2 replaces or removes them.
+
 **Baseline:** [`docs/Spec.md`](./Spec.md) remains the source of truth. This document records the incremental enhancements layered on top of it, the rules as implemented, and where each lives in the code. When this document and the code disagree, the code and its tests are authoritative. Open an issue so this file can be corrected.
 
 All behaviour is simulated. There are no external APIs and no real endpoint commands. Scores and estimates are deterministic and labelled as simulated or estimated.

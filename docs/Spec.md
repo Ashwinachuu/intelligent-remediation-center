@@ -1,5 +1,7 @@
 # Intelligent Remediation Center — Product & Engineering Specification
 
+> **Superseded in part by [V1.2](V1.2.md).** Where this baseline conflicts with V1.2 (manager role, runbook library, policies, autonomous execution, maturity, MTTR/financial metrics), V1.2 wins.
+
 > **Enhancements:** incremental Product Experience & Trust enhancements (workspace, explainable assessment, preflight, step-level approval, consent experience, similar incidents, correlation, draft lifecycle, business impact, maturity) are specified in [ENHANCEMENTS.md](./ENHANCEMENTS.md). This document remains the baseline.
 
 **Version:** 1.0 | **Status:** Ready for prototype implementation | **Audience:** Coding agents, engineers, designers and interview reviewers

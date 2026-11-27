@@ -1,206 +1,123 @@
 # Intelligent Remediation Center
 
-**Resolve faster. Intervene when necessary. Stay in control.**
+**Employees fix what they safely can. IT approves everything else. Nothing runs without a human.**
 
-This is a working prototype for the Freshworks Senior PM assignment (Question 2, Option B: IT Ops & Trust Controls). It shows how an AI system can find common laptop problems (Endpoint Health / Laptop Hygiene), suggest fixes from a governed runbook library, and run them only with human approval or an explicit policy. It also covers confidence thresholds, explanations, one-click approval and rollback, verification and a full audit trail.
+This is a working prototype for the Freshworks Senior PM assignment (Question 2, Option B: IT Ops & Trust Controls). An employee raises a laptop ticket and AI walks them through safe, adaptive troubleshooting. When that doesn't work, the **same ticket** goes to IT with the full history and an AI-recommended fix. An IT admin must explicitly approve every AI execution. Fixes are verified before a ticket closes, can be rolled back, and are fully audited. Issues the AI can't handle are resolved manually and can become validated, reusable knowledge.
 
-**Specifications.** [`docs/Spec.md`](docs/Spec.md) is the baseline. [`docs/ENHANCEMENTS.md`](docs/ENHANCEMENTS.md) adds the Product Experience & Trust enhancements and records exactly how each one is implemented:
+**Current version: V1.2, "Product Simplification & Employee-Admin Experience".** See [`docs/V1.2.md`](docs/V1.2.md). [`docs/Spec.md`](docs/Spec.md) is the original baseline. [`docs/ENHANCEMENTS.md`](docs/ENHANCEMENTS.md) describes V1.1. Where those documents conflict with V1.2, V1.2 wins.
 
-* agent workspace and prioritized queue
-* explainable assessment
-* preflight gate
-* step-level approval
-* employee consent experience
-* similar incidents
-* incident correlation
-* draft runbook lifecycle
-* business impact
-* automation maturity
-
-> **Demo mode: the AI and endpoint actions are simulated.** All people, devices, tickets and numbers are fictional and generated on your machine. The app makes no real device commands, AI calls, integrations or credential use. Confidence scores are deterministic simulated values, not calibrated probabilities. This is an independent concept inspired by ITSM workflows and is not an official Freshworks product.
+> **Demo mode: the AI and laptop actions are simulated.** All people, devices, tickets and numbers are fictional and generated in your browser. The app sends no real device commands, makes no AI calls and uses no integrations. Confidence scores are deterministic simulated values, not calibrated probabilities. This is an independent concept and not an official Freshworks product.
 
 ## The approach in one minute (interview framing)
 
-The goal is not "maximum automation". It is **safe automation where the work is boring, and fast human help where it is not**. Everything in the prototype follows from one simple model and three rules:
+The goal is not maximum automation. It is to **take the boring work off IT without taking control away from IT**.
 
-* **One flow:** Detect → Diagnose → Decide → Authorize → Run → Verify → Close, roll back or escalate.
-* **Rule 1: confidence is not permission.** The score decides whether a fix is *recommended*. Risk decides *who must approve* it.
-* **Rule 2: check before every change.** Preflight runs before the start and again right before each device change. A fail or pending check blocks the run.
-* **Rule 3: nothing closes unverified.** A failed verification offers rollback and goes to a human.
-
-The demo data is deliberately tiny: **one example ticket per path**, covering happy paths and failures alike. The failures include an unsupported device, a blocked device group, an employee declining, an approval expiring, a rejected plan, a failure before any change, a verification failure with rollback, a failed rollback and a reopened ticket. The in-app **How it works** page (`/#/guide`) lists all 20 paths with what happens, what the system does and the result, and links to the example ticket or a live *Try it*.
-
-**What we kept simple on purpose:**
-
-* one runbook per incident type, with 3–4 small steps and no free-form commands;
-* rule-based, explainable scores;
-* one policy function that every screen relies on;
-* trust that grows per runbook (L0–L4), granted only by an admin;
-* browser-only state with fictional data.
-
----
+* **Two roles only: Employee and IT Admin.** AI is a capability, not an actor.
+* **Self-service first.** AI asks one question or gives one step at a time, and only suggests safe steps an employee can do. If the employee confirms the issue is fixed, the ticket closes as *Employee Self-Service*, with no admin effort.
+* **Escalate without starting over.** A failed step, low confidence, the attempt limit, or "Get help from IT" all send the same incident to IT, with every answer attached.
+* **AI recommends; a human authorizes.** Every AI execution needs explicit admin approval. The approval is bound to the incident, device and exact fix, and a changed plan invalidates it. Disruptive fixes also need the employee's consent.
+* **Nothing closes unverified.** If verification fails, the incident stays open and rollback is offered. A rollback is never counted as a resolution.
+* **Learn from humans.** A manual fix can be saved as a reusable resolution. An admin validates it, and only then does AI use it for similar tickets.
 
 ## 1. Setup
 
-You need Node 22.12+ (or 24 LTS) and npm.
+Requires Node 20+.
 
 ```bash
-npm install          # or: npm ci
-npm run dev          # http://localhost:5173
-npm run build        # typecheck (tsc -b) + Vite production build -> dist/
-npm run preview      # serve dist/ (http://localhost:4173)
-npm run lint         # ESLint (typescript-eslint + react-hooks), zero warnings allowed
-npm run test         # Vitest + React Testing Library (non-watch)
-npm run test:e2e     # Playwright core flows (builds + previews automatically)
+npm install
 ```
-
-If Playwright browsers are not installed on your machine, run `npx playwright install chromium` once first.
-
-### Deploying (static)
-
-The output is a static site, and hash routes (`/#/...`) survive a refresh with no server rewrites. To deploy on Vercel or any static host, use these settings: framework **Vite**, install `npm ci`, build `npm run build`, output `dist`. See <https://vite.dev/guide/static-deploy.html>. `base: './'` is set so `dist/` also works from a sub-path.
-
-With the Vercel CLI you can deploy directly from the project folder:
 
 ```bash
-npx vercel deploy --prod
+npm run dev
 ```
 
-A reviewer deployment exists at <https://intelligent-remediation-center.vercel.app>. It is redeployed manually from a local build and does not deploy automatically from git.
+Open http://localhost:5173. Use the role switcher (top right) to move between **Employee** and **IT Admin**. Use **Demo scenarios** (top right) to start any of the five scripted scenarios. **Reset demo data** restores the seed.
 
-**State lives only in the browser.** Everything is stored in `localStorage` under the key `remediation-center:v1`. A shared URL does **not** share the changes a reviewer has made. Each browser starts from its own freshly generated synthetic data.
+| Command | Purpose |
+|---|---|
+| `npm run typecheck` | TypeScript strict |
+| `npm run lint` | ESLint, zero warnings |
+| `npm run test` | Vitest domain and UI tests |
+| `npm run test:e2e` | Playwright end-to-end tests (builds first, uses `vite preview`) |
+| `npm run build` | Production build into `dist/` |
 
----
+### Deploying
+
+This is a static single-page app with hash routing, so no server configuration is needed. On Vercel, the framework is Vite and the output directory is `dist`.
+
+```bash
+vercel deploy
+```
+
+```bash
+vercel deploy --prod
+```
+
+The first command creates a preview deployment. The second promotes to production.
 
 ## 2. Architecture
 
-```text
-src/
-  app/        App (HashRouter + routes), Shell (sidebar, top bar, demo controls, toasts, job runner), Zustand store, scenario loader
-  domain/     types, catalog (runbooks, simulator actions, baselines, scenarios), policy, diagnosis, transitions,
-              engine (guarded actions + persistent execution runner), metrics (pure selectors), util (hash, dates)
-              + preflight (reusable safety checklist), insights (similar incidents, assessment, SLA, correlation, workspace queue),
-              maturity (L0–L4 criteria, runbook lifecycle)
-  data/       seed (17 curated example incidents, one per path + live scenarios A–J), persistence (schema v2 validation, safe reset)
-  components/ shared UI (badges, modal, ticket creator)
-  pages/      overview, incidents, incident-detail, approvals, library, policies, audit, opportunities, not-found
-  tests/      Vitest unit / RTL tests
-e2e/          Playwright flows
-```
+* **React 18 + TypeScript + Vite**, a **Zustand** store, **Recharts** and plain CSS. State persists in `localStorage` (`remediation-center:v1`, schema v4). Invalid or older data resets safely with a warning.
+* **Pure domain engine** (`src/domain/`). Every change goes through `applyAction(state, action, now)`. It checks role authorization and the transition table, and writes an audit entry for each state change. The UI holds no business logic.
 
-* **Pure domain, guarded mutations.** Every state change goes through `applyAction(state, action, now)` in `domain/engine.ts`. It applies the change to a copy of the state, so the input is never mutated, and returns either a new state or a typed error (`ILLEGAL_TRANSITION`, `UNAUTHORIZED`, `BLOCKED`, `VALIDATION`, `DUPLICATE`, `RETRY_LIMIT`, `CONFLICT`, `EXPIRED`). An error leaves business state untouched. Authorization blocks are appended to the audit log as `AUTHORIZATION_BLOCKED`.
-* **Central transitions.** `domain/transitions.ts` holds the allowed status graph. Every status change goes through `Tx.move`, which checks the move against that graph and writes an audit event with the from/to states.
-* **Deterministic policy gate.** `evaluateRoute()` in `domain/policy.ts` is the only routing function. The engine, the approval UI, the live route matrix and the sample evaluator all call it.
-* **Plan binding.** A plan hash is a stable serialization of device id, diagnosis revision, runbook id/version, risk, policy version and category (FNV-based). It is a consistency check, **not** cryptographic security. Approvals and consent are bound to the plan hash, and approvals also to the policy version. A new diagnosis revision invalidates outstanding approvals, consent and schedules.
-* **Persistent job runner.** `processDue(state, now)` advances executions using the persisted `nextAt` timestamps. It runs on mount and every 250 ms. Steps take 700 ms, verification 900 ms and closure 700 ms. After a refresh, jobs resume from those timestamps, and the runner only moves forward, so a duplicate tick adds no audit events. Approval expiry, consent expiry and due schedules are handled in the same loop.
-* **Persistence.** The app writes to `localStorage` after every mutation. On load the saved state is validated (schema version and shape). If it is corrupt or from an incompatible version, the app regenerates the seed and shows a warning banner. If a second tab is detected (BroadcastChannel / storage events), a warning recommends using one tab. This is not a production concurrency claim.
-* **Metrics are derived, never stored.** `domain/metrics.ts` computes every KPI, chart and guardrail from tickets, executions, approvals and audit events. Zero denominators show `—`, never NaN or Infinity. Every count links to the incident list with an explicit predicate and date basis carried in URL query parameters.
-
----
-
-## 3. What is implemented
-
-| Area | Status |
+| File | Responsibility |
 |---|---|
-| Ticket intake (creator modal on every route, 8 "Load scenario" shortcuts, custom keyword inference, telemetry preview, outcome selector) | ✅ P0 |
-| Deterministic diagnosis (scenario + telemetry, mismatch → 65, evidence/uncertainty, revisions, additional-diagnostics re-run) | ✅ P0 |
-| Policy gating (thresholds, risk independent of confidence, hard blockers, pause, offline, busy, consent, schedule, role) | ✅ P0 |
-| Explicit approval (one click when gates pass, consent / schedule variants, HIGH = admin + window + impact confirmation, TTL, duplicate-click guard) | ✅ P0 |
-| Execution → separate verification phase → closure; failure → rollback available or escalated | ✅ P0 |
-| Rollback (30-min deadline, restores only the fields that execution changed, refuses on conflict, role by original risk, allowed while paused, failure → manual recovery) | ✅ P0 |
-| Escalation, manual verified resolution, reopen (agent or simulated employee), employee-confirm closure mode | ✅ P0 |
-| Approvals queue (risk then age, evidence must be expanded before approve, consent tab, expired/invalidated tab, no bulk approval) | ✅ P0 |
-| Policies (admin-only, versioned with reason, preapproval confirmation, live matrix, impact preview, re-evaluation, restore defaults as a new version) | ✅ P0 |
-| Audit (append-only table, filters, event detail, CSV export with spreadsheet-injection protection) | ✅ P0 |
-| Overview dashboard (presets / custom range, filters, 8 KPI cards with previous-period comparison, queue snapshot, 6 chart/panels, exclusive status buckets, drill-downs) | ✅ P0 |
-| Runbook library (versioned, derived success rate, draft from manual ticket, admin edit/publish/retire/new version, validation, plan invalidation) | ✅ P0/P1 |
-| Opportunities (gap grouping, modeled potential hours, separate policy/endpoint blockers, create draft, no auto-publish) | ✅ P1 |
-| CSV export | ✅ P1 |
-| **Enhancements** (see docs/ENHANCEMENTS.md): workspace + prioritized queue, three-signal AI assessment, preflight gate, step-level approval, employee consent experience, similar incidents, correlation + parent incidents, AI draft lifecycle, business impact + assumptions, maturity L0–L4 | ✅ P0 + P1 |
-| Responsive 1440 → 375 px (drawer nav, scrolling tables, stacked panels), keyboard focus, accessible dialogs, live regions, reduced motion | ✅ |
+| `troubleshooting.ts` | Adaptive question and step trees per issue type; validated knowledge adds its own questions and steps |
+| `diagnosis.ts` | Simulated AI: category, confidence, root cause, plan hash |
+| `policy.ts` | Routing: unsupported/review versus approval → consent → device readiness. There is no autonomous path |
+| `preflight.ts` | Prerequisite checks, which are never overridable |
+| `engine.ts` | Actions, timed execution runner, verification, rollback, reopen, manual resolution and knowledge |
+| `lifecycle.ts` | Maps internal states to the 8 product statuses, the approval status, the resolution method and the employee-facing status |
+| `metrics.ts` | Every KPI and chart value, derived from state, plus drill-down definitions |
+| `insights.ts` | Workspace queue ("why it's here"), SLA, similar incidents, opportunities |
+| `knowledge.ts` | Matching validated resolutions to new tickets |
 
----
+* **Lifecycle (product statuses):** Open · Self-Service in Progress · Review Needed · Remediation in Progress · New/Unsupported · Manual Investigation · Closed · Reopened. **Overdue** is an SLA indicator, not a status. The resolution method (Self-Service, Human-Approved AI Remediation, Manual) and the approval status (Not Required, Pending, Approved, Rejected, Expired/Invalidated) are tracked separately.
 
-## 4. Simulator and limitations
+## 3. What each portal does
 
-* **Every action** is an in-memory change to a fictional `Device`: the seven catalog actions RB-001…RB-007. No free-form commands are possible. A runbook is executable only if it is published, validated and maps to a catalog simulator action that matches its category. RB-008 (crash triage) is a diagnostic-only draft.
-* **Outcomes are chosen at ticket creation:** Success, Verification failure after action, Execution failure before action, or Rollback failure after verification failure.
-* **Durations.** Live executions finish in a few seconds. The UI labels these as *accelerated demo* and shows the actual elapsed time. Analytics use **modeled** minutes (Spec §7: AUTO = expectedMin; HUMAN = expectedMin + 8 + scheduled delay; MANUAL = baseline) and category baselines (Spec §9). These are not measured savings.
-* **Small, curated history.** Instead of a large random dataset, the seed contains **17 past incidents over the last 6 days — one per path** (see the *How it works* page and `src/domain/examples.ts`), plus 12 live demo tickets for today (scenarios A–J; J is three reports). Every record is generated by driving the real domain actions on a simulated clock, so diagnoses, approvals, consent, executions, verification and audit stay coherent and every dashboard number can be traced to a ticket. History used a synthetic pilot **policy v0** (preapproval on); current default **policy v1** (preapproval off) is created at reset.
-* **Roles are simulated:** Agent "Alex", Admin "Morgan", Manager "Riley". They are not a security boundary. The audit log lives in `localStorage`. You can inspect it, but it is **not tamper-proof**.
-* **Storage.** The seeded state is about 280 KB of `localStorage`.
+**Employee:**
 
-### Documented decisions (where the spec left room)
+* **Raise a Ticket:** pick an issue type and describe it. Guided troubleshooting starts immediately.
+* **My Tickets:** a status tracker; guided questions and steps with the answers Yes, No, Not sure, Completed, Unable to complete, Issue resolved and Issue still persists; consent requests; reopen; and the full history.
 
-1. **Authorization comes before consent.** The spec lists "busy + disruptive → AWAITING_CONSENT" ahead of the approval step. The gate checks approval (or policy) first, then consent, so an employee is never asked to consent to a plan nobody has authorized. Busy + disruptive without consent → AWAITING_CONSENT. Busy with consent, or a non-disruptive plan while busy → WAITING_DEVICE. Nothing executes while the device is busy.
-2. **Approval validity for scheduled plans.** An approval expires at `max(approval time, scheduled window) + TTL`. Without this, a window more than 60 minutes out would always expire before its start.
-3. **`Ticket.outcome`** holds the simulated outcome chosen in the creator. The final result of each run is stored on `Execution.outcome`.
-4. **Diagnosis runs synchronously.** It is deterministic and logged as DIAGNOSIS_STARTED → DIAGNOSIS_COMPLETED. Starting a READY plan, which includes policy-preapproved plans, is asynchronous via the runner. "Approve & execute" starts immediately after the gates are re-checked.
-5. **Pre-start cancellation.** If the policy is paused, or the device goes offline or busy, before the action step, the execution is cancelled with no mutation. The consumed approval then counts as rework, and the ticket is routed again (e.g. REVIEW_REQUIRED when paused). Cancelled runs do not count as attempts.
-6. **Manual resolution** closes immediately when `closureMode = AUTO`. Under EMPLOYEE_CONFIRM it stays RESOLVED until the simulated employee confirms.
-7. **Re-evaluation after a policy save** covers every non-running gate-state ticket. REVIEW_REQUIRED tickets are re-diagnosed only if the engine would now route them differently, so a human "request review" decision is never undone.
-8. **"Overdue approval"** means a plan has been waiting longer than the policy approval TTL since its diagnosis.
-9. **Opportunity "gaps"** are manual, escalated or review tickets whose current diagnosis has no runbook. Tickets that have a known runbook but are blocked by safety controls are listed separately.
+**IT Admin:**
 
-### Known gaps
+* **Overview:** date presets (Today, 7, 30 or 90 days, or custom) and an issue filter. A KPI row reconciles to the total. Four success questions: AI-assisted rate, self-service rate, unsupported rate (still open versus since resolved) and estimated admin time saved (with a formula tooltip). Charts: resolved per day, status distribution, AI versus manual, unsupported trend, turnaround, reopen rate and SLA compliance. Every number drills down to the matching incident list.
+* **My Workspace:** 5 clickable KPI tiles. The queue defaults to *All action required*, and the chips filter by Pending approval, Human investigation and Overdue. Each row says why it is there.
+* **Incidents:** filter by status, approval, method, issue, overdue, date and metric.
+* **Incident detail:** the employee's troubleshooting history; the AI recommendation (root cause, confidence, steps, impact and risks); **Approve & Execute / Reject Recommendation / Investigate Manually**; live execution and verification; rollback; manual resolution with *save as reusable resolution*; similar incidents; and activity.
+* **Approvals:** pending recommendations, with no duplicates; the queue updates immediately.
+* **Opportunities:** recurring and unsupported issue groups with the next action, plus the reusable resolutions awaiting validation (validate or reject).
+* **Audit Logs:** filterable, append-only, and exportable as CSV (with injection-safe cells).
+* **AI Settings:** confidence threshold (default 80%, labeled a prototype assumption), troubleshooting attempts, employee consent, and time-saving baselines. Approval and verification are **Always on**. Every change is versioned with a reason.
 
-* No real multi-tab merge: the app only warns (by design for this prototype).
-* Charts show text summaries, a legend, tooltips and drill-down links. They do not include a separate full data table.
-* Estimated cost savings depend on the configurable hourly cost in **Assumptions & methodology**. They are estimates, not measured savings.
-* Similarity, correlation and "AI-generated" drafts are deterministic, rule-based simulations, not machine learning.
-* The action queue separates items older than 7 days as an *aged backlog* link (unused with the curated seed, but kept for realistic data volumes).
+## 4. Demo walkthrough (about 7 minutes)
 
----
+| # | Scenario (Demo scenarios menu) | What to show |
+|---|---|---|
+| 1 | **Self-service fix (slow laptop)** | Answer: Today → Whole laptop → No → Yes → Completed ×3 → Issue resolved. The ticket closes as *Employee self-service* with approval *Not required*. Switch to IT Admin: on Overview → Today, the self-service count went up. |
+| 2 | **Escalation + approved AI fix (Wi-Fi)** | Answer Yes ×4 and the ticket is *Sent to IT support*. As IT Admin, open the same incident: it shows the employee's answers and the AI recommendation. Click Approve & Execute; the action needs an acknowledgement. As Employee, give consent. Watch it run and verify. As IT Admin: Closed · Human-approved · Verification passed. |
+| 3 | **Unfamiliar issue → learning** | The answers lead to *New/Unsupported*. As IT Admin, click Resolve manually and save it as a reusable resolution. In Opportunities, validate it. Run **3b**: the employee now gets the validated steps, and when escalated, the admin sees *From validated resolution K-002*. |
+| 4 | **Failed fix → rollback** | Approve, and the employee consents. Verification fails, so the incident stays open (Manual investigation). Roll back: settings are restored, and it is still not counted as resolved. Audit shows the full sequence. |
+| 5 | **Reopen** | The employee reopens a resolved ticket. It appears in the admin's *Human investigation* queue as reopened. Run AI diagnosis again to get a recommendation. |
 
-## 5. Demo walkthrough (enhanced, about 7 minutes)
+Also worth showing: **Reject** from Approvals (nothing executes); raising the threshold to 90% in AI Settings (pending recommendations are reassessed and audited); and the role switcher hiding admin pages from employees.
 
-The **Demo** menu, and **Load scenario** on the Incidents page, create any scenario A–J as a fresh ticket with its own fictional device. The menu also resets all demo data, which needs explicit confirmation. Scenarios I and J are also pre-seeded.
+## 5. Tests
 
-0. **How it works** (`/#/guide`). Start here: the one-page model and the scenario matrix. Open any example ticket, for instance *Rollback itself fails*, to show that unhappy paths are first-class.
-1. **Workspace** (`/#/overview`). Walk through the six tiles: awaiting my approval, in progress, investigation, SLA, verified today and time saved. Then the queue chips, the **shared-incident banner**, and the **prioritized action queue**, where each factor is shown and each row opens the incident at its action. Below the workspace are the analytics: cohort KPIs, the guardrails, the **automation funnel** (reported → eligible → attempted → verified) and **Business impact (estimated)**. Open *Assumptions & methodology* to show that the baselines and hourly cost are editable and drive every estimate.
-2. **Low-risk policy-based remediation.** As Admin, go to Policies and enable preapproval with a reason. Load scenario A. It runs with policy authorization because RB-001 is at maturity L4; the preflight snapshot is in the execution record. Load scenario B, which still needs approval.
-3. **Explainable Wi-Fi approval (B).** Show the three signals:
-   * diagnosis confidence 94;
-   * remediation confidence 50 — honestly low, because only 1 of the 2 past Wi-Fi runs verified (the other is the rollback example);
-   * execution readiness: pending authorization and consent.
+| Suite | Count | Covers |
+|---|---|---|
+| `src/tests/v12.test.ts` (Vitest) | 23 | Adaptive branching, self-service closure, escalation with history, attempt limit, network-wide → unsupported, no execution without approval, approval permissions/ack/duplicates, plan binding and invalidation, threshold, consent, failed verification and rollback, irreversible fixes, the knowledge lifecycle and retrieval, reopen, metric reconciliation and formulas, time saved, date filters, workspace filters, no autonomous history, corrupt storage, CSV injection |
+| `src/tests/ui.test.tsx` (Vitest + RTL) | 5 | Two roles only, first guided question, role guarding, workspace default, locked settings |
+| `e2e/flows.spec.ts` (Playwright) | 8 | Scenarios 1–5 end to end across both roles, reject flow, KPI drill-down reconciliation plus settings and audit filters, every route for both roles, and no horizontal overflow at 375px. Each test also fails on any console error |
 
-   Then show "why this recommendation", the preflight checklist, and **similar incidents**, including the failure pattern ("connectivity probe 0/3 … rolled back"). Approve.
-4. **Consent.** The *simulated employee view* offers Proceed now, Choose a later time, Ask IT for help, or Decline. Choose a later time: the ticket becomes SCHEDULED and the response appears in Approvals → Awaiting consent. Then advance the schedule. Scenario C shows the HIGH-risk OS patch blocked pending consent after admin approval.
-5. **Multi-step pause (I).** Read-only S1 and S2 ran automatically, and the ticket is paused at **S3 Apply patch (HIGH)**. The agent's step approval is disabled with a reason. As Admin, choose *Approve step*, confirm the impact (optionally schedule it), and the action runs after preflight re-validation.
-6. **Failure → rollback → escalation (D / H).** Unchanged from the baseline, including snapshot restore and manual recovery instructions.
-7. **Unknown incident → draft (E).** Resolve manually, then **Propose runbook draft**, which creates a structured, AI-generated (simulated) draft with root cause, applicability, risks and recovery. Add a tested scenario, then submit for review. As Admin, approve and publish it; it lands as L1 guidance only, never executable. In the Library, **RB-003** shows the eligibility criteria and can be promoted L2 → L3 with a documented reason.
-8. **Shared network incident (J).** Click the workspace banner to review the correlation evidence: 3 employees on NET-B2 within 8 minutes. **Create parent incident & link 3** pauses the endpoint fixes. Resolve the parent manually; the children stay open until **Verify recovery** passes its read-only probe.
-9. **Close.** Describe the progressive rollout (shadow → human-approved pilot → admin-preapproved low-risk → expand on evidence, now formalized as maturity L0–L4) and the production requirements in Spec §12. Restate that all results, scores and device actions are simulated.
+Typecheck and lint are clean, all 36 tests pass, and the build succeeds.
 
----
+## 6. Limitations
 
-## 6. Test results
-
-Results from the last verified run in this repository, on Node 22, Chromium 1.63 (Playwright):
-
-* `npm run lint` is clean (0 errors, 0 warnings).
-* `npm run build` passes: `tsc -b` (strict) plus the Vite production build.
-* `npm run test` passes **108 tests** across 4 files:
-  * **`domain.test.ts` (36).** All baseline Spec §11 rules: policy boundaries at 59/60/79/80/94/95/100; HIGH never auto; pause, unsupported OS, unmanaged, offline and busy routing; stale approval; wrong role; duplicate execution; consent denial and expiry; policy-version invalidation; runbook retirement; schedule re-check; verification failure; irreversible rollback denial; rollback failure; reopening; retry limit; persisted jobs resuming without duplicate audit. HIGH OS plans now also pass through the step approval.
-  * **`metrics.test.ts` (10).** Date-range boundaries, empty denominators, cohort versus activity basis, no double counting, filtered counts, previous period, seed coherence (12 live demo tickets including I/J), safe reset and CSV injection protection.
-  * **`enhancements.test.ts` (56).**
-    * Curated dataset: 29 tickets, one per path, and every path ends in the state the guide describes (rollback, failed rollback, failure before any change, decline, expiry, rejection, reopen, unsupported, blocked, open review). Zero unauthorized runs and 100 % audit completeness across the failures. RB-003 has exactly the 3 clean runs needed for L3.
-    * Preflight PASS/PENDING/NA states; low battery blocking execution; audit records; re-validation before the action.
-    * Step-level approval: pause with no mutation, admin and impact rules, scope, rejection, scheduling and advance, invalidation when the runbook changes.
-    * Consent: window choice synced to the workspace, IT assistance; consent never replaces approval.
-    * Correlation: detection thresholds, linking with hold, verified recovery only.
-    * Maturity: L3 versus L4 gating, admin-only promotion criteria.
-    * AI draft lifecycle and reviewer.
-    * Nested funnel, assumption-driven cost, empty-denominator estimates, queue priority and deep links, SLA, similarity failure patterns and the assessment signals.
-  * **`ui.test.tsx` (6).** Overview, approve, HIGH block, manager read-only, not-found and read-only policies.
-* `npm run test:e2e` passes **18 / 18** Playwright flows: Spec §11 flows 1–10, plus enhancement flows E1–E8.
-  * **E1:** a workspace queue item deep-links to the action.
-  * **E2:** a preflight battery block, then recovery.
-  * **E3:** the multi-step pause, the agent blocked, the admin approving the step.
-  * **E4:** the employee-selected window.
-  * **E5:** correlation, then parent, then verified child recovery.
-  * **E6:** draft → review → publish (L1) and RB-003 promotion to L3.
-  * **E7:** assumptions changing the cost estimate.
-  * **E8:** *How it works* lists all 20 paths, each with an example ticket or a live try-it; opening the failed-rollback example; trying scenario D live.
-
-  Every flow asserts that no console errors occurred, and flow 10 checks for horizontal overflow at 375 px.
+* The AI is a deterministic simulator (keyword and telemetry rules, plus knowledge matching by issue type and shared words). It is not an LLM, and its confidence is not calibrated.
+* Laptop actions, telemetry, notifications and SLA clocks are simulated in the browser. There are no real endpoint agents, ITSM integration, identity or SSO. The role switcher stands in for authentication.
+* Data lives in one browser's `localStorage`. Nothing is shared between users or devices.
+* Time-saved figures use configurable baseline minutes (prototype assumptions), not measured effort.
+* The 80% threshold, 2 attempts and 60-minute approval expiry are illustrative defaults.

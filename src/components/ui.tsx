@@ -1,18 +1,34 @@
 import { useEffect, useId, useRef, type ReactNode } from 'react';
-import { AlertTriangle, CheckCircle2, Circle, Clock, Loader2, OctagonAlert, PauseCircle, RotateCcw, ShieldAlert, ShieldCheck, Undo2, UserCheck, X, XCircle, Zap, Hand, CalendarClock, Search, WifiOff } from 'lucide-react';
-import type { Path, Risk, Status } from '../domain/types';
-import { STATUS_LABEL } from '../domain/transitions';
+import { AlertTriangle, CheckCircle2, Circle, Clock, Hand, Loader2, MessageCircleQuestion, PauseCircle, RotateCcw, Search, ShieldAlert, ShieldCheck, UserCheck, Wrench, X, XCircle, Zap } from 'lucide-react';
+import type { ApprovalStatus, Path, ProductStatus, Risk, Ticket } from '../domain/types';
+import { APPROVAL_LABEL, METHOD_LABEL, PRODUCT_STATUS_LABEL, productStatus } from '../domain/lifecycle';
+import { SLA_LABEL, slaState } from '../domain/insights';
 
-const STATUS_STYLE: Record<Status, { cls: string; Icon: typeof Circle }> = {
-  OPEN: { cls: 'b-neutral', Icon: Circle }, DIAGNOSING: { cls: 'b-accent', Icon: Loader2 }, REVIEW_REQUIRED: { cls: 'b-warning', Icon: Search },
-  AWAITING_APPROVAL: { cls: 'b-warning', Icon: Hand }, AWAITING_CONSENT: { cls: 'b-warning', Icon: UserCheck }, WAITING_DEVICE: { cls: 'b-neutral', Icon: WifiOff },
-  SCHEDULED: { cls: 'b-neutral', Icon: CalendarClock }, READY: { cls: 'b-accent', Icon: Zap }, EXECUTING: { cls: 'b-accent', Icon: Loader2 }, VERIFYING: { cls: 'b-accent', Icon: Loader2 },
-  ROLLBACK_AVAILABLE: { cls: 'b-danger', Icon: Undo2 }, ROLLING_BACK: { cls: 'b-danger', Icon: RotateCcw }, ESCALATED: { cls: 'b-danger', Icon: OctagonAlert },
-  STEP_APPROVAL: { cls: 'b-warning', Icon: Hand }, RESOLVED: { cls: 'b-success', Icon: CheckCircle2 }, CLOSED: { cls: 'b-success', Icon: CheckCircle2 }, REOPENED: { cls: 'b-warning', Icon: RotateCcw },
+const PS_STYLE: Record<ProductStatus, { cls: string; Icon: typeof Circle }> = {
+  OPEN: { cls: 'b-neutral', Icon: Circle }, SELF_SERVICE: { cls: 'b-accent', Icon: MessageCircleQuestion }, REVIEW_NEEDED: { cls: 'b-warning', Icon: Hand },
+  REMEDIATION: { cls: 'b-accent', Icon: Loader2 }, UNSUPPORTED: { cls: 'b-danger', Icon: Search }, MANUAL: { cls: 'b-warning', Icon: Wrench },
+  CLOSED: { cls: 'b-success', Icon: CheckCircle2 }, REOPENED: { cls: 'b-warning', Icon: RotateCcw },
 };
-export function StatusBadge({ status }: { status: Status }) {
-  const { cls, Icon } = STATUS_STYLE[status];
-  return <span className={`badge ${cls}`} data-status={status}><Icon size={12} aria-hidden className={['EXECUTING', 'VERIFYING', 'DIAGNOSING'].includes(status) ? 'spin' : undefined} />{STATUS_LABEL[status]}</span>;
+/** Product status badge (V1.2 §12) — derived from the ticket, never stored separately. */
+export function StatusBadge({ t }: { t: Ticket }) {
+  const ps = productStatus(t);
+  const { cls, Icon } = PS_STYLE[ps];
+  return <span className={`badge ${cls}`} data-status={ps}><Icon size={12} aria-hidden className={ps === 'REMEDIATION' ? 'spin-slow' : undefined} />{PRODUCT_STATUS_LABEL[ps]}</span>;
+}
+export function ApprovalBadge({ status }: { status: ApprovalStatus }) {
+  const cls = status === 'PENDING' ? 'b-warning' : status === 'APPROVED' ? 'b-success' : status === 'REJECTED' ? 'b-danger' : status === 'EXPIRED' ? 'b-outline' : 'b-neutral';
+  const Icon = status === 'PENDING' ? Hand : status === 'APPROVED' ? UserCheck : status === 'REJECTED' ? XCircle : status === 'EXPIRED' ? Clock : Circle;
+  return <span className={`badge ${cls}`} data-approval={status}><Icon size={12} aria-hidden />{APPROVAL_LABEL[status]}</span>;
+}
+export function MethodBadge({ path }: { path?: Path }) {
+  if (!path) return <span className="muted small">—</span>;
+  const Icon = path === 'SELF_SERVICE' ? Zap : path === 'HUMAN_APPROVED' ? UserCheck : Wrench;
+  return <span className="badge b-outline" data-method={path}><Icon size={12} aria-hidden />{METHOD_LABEL[path]}</span>;
+}
+export function SlaBadge({ t, now }: { t: Ticket; now: number }) {
+  const st = slaState(t, now);
+  if (st === 'OK' || st === 'MET') return <span className="small muted">{SLA_LABEL[st]}</span>;
+  return <span className={`badge ${st === 'BREACHED' || st === 'MISSED' ? 'b-danger' : 'b-warning'}`}><Clock size={12} aria-hidden />{SLA_LABEL[st]}</span>;
 }
 export function RiskBadge({ risk }: { risk?: Risk }) {
   if (!risk) return <span className="muted">—</span>;
@@ -20,16 +36,9 @@ export function RiskBadge({ risk }: { risk?: Risk }) {
   const Icon = risk === 'HIGH' ? ShieldAlert : risk === 'MEDIUM' ? AlertTriangle : ShieldCheck;
   return <span className={`badge ${cls}`}><Icon size={12} aria-hidden />{risk === 'HIGH' ? 'High' : risk === 'MEDIUM' ? 'Medium' : 'Low'} risk</span>;
 }
-export const PATH_LABEL: Record<Path, string> = { AUTO_POLICY: 'Auto (policy)', HUMAN_APPROVED: 'Human-approved', MANUAL: 'Manual' };
-export function PathBadge({ path }: { path?: Path }) {
-  if (!path) return <span className="muted small">Pending</span>;
-  const Icon = path === 'AUTO_POLICY' ? Zap : path === 'HUMAN_APPROVED' ? UserCheck : Hand;
-  return <span className="badge b-outline"><Icon size={12} aria-hidden />{PATH_LABEL[path]}</span>;
-}
-export function ScoreBadge({ score }: { score?: number }) {
-  if (score === undefined) return <span className="muted">—</span>;
-  const cls = score >= 95 ? 'b-success' : score >= 80 ? 'b-accent' : score >= 60 ? 'b-warning' : 'b-danger';
-  return <span className={`badge ${cls}`} title="Simulated score — not a calibrated probability">{score}</span>;
+export function ConfidenceBadge({ value, threshold }: { value?: number; threshold: number }) {
+  if (value === undefined) return <span className="muted">—</span>;
+  return <span className={`badge ${value >= threshold ? 'b-accent' : 'b-danger'}`} title="Simulated confidence — not a calibrated probability">{value}%</span>;
 }
 export function ResultIcon({ result }: { result: string }) {
   if (result === 'FAILURE') return <XCircle size={14} color="var(--danger)" aria-label="Failure" />;

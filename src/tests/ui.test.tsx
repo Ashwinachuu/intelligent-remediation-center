@@ -1,54 +1,48 @@
-import { render, screen, fireEvent, within, act } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { AppRoutes } from '../app/App';
 import { useStore } from '../app/store';
 
-function renderAt(path: string) {
-  return render(<MemoryRouter initialEntries={[path]}><AppRoutes /></MemoryRouter>);
-}
-const demo = (scenario: string) => Object.values(useStore.getState().state.tickets).find((t) => t.demo && t.scenario === scenario)!;
+const renderAt = (path: string) => render(<MemoryRouter initialEntries={[path]}><AppRoutes /></MemoryRouter>);
+const setRole = (role: 'EMPLOYEE' | 'ADMIN') => act(() => { useStore.getState().dispatch({ type: 'SET_ROLE', role }); });
 
 describe('UI', () => {
   beforeEach(() => { act(() => useStore.getState().reset()); });
 
-  it('renders overview KPIs derived from state with demo banner', () => {
+  it('exactly two roles: the switcher offers Employee and IT Admin only', () => {
     renderAt('/overview');
-    expect(screen.getByText('Endpoint remediation overview')).toBeInTheDocument();
-    expect(screen.getByText(/Demo mode · simulated AI and endpoint actions/)).toBeInTheDocument();
-    const kpis = screen.getByTestId('kpis');
-    expect(within(kpis).getByText('Total incidents')).toBeInTheDocument();
+    expect(screen.getByTestId('role-employee')).toBeInTheDocument();
+    expect(screen.getByTestId('role-admin')).toBeInTheDocument();
+    expect(screen.queryByText(/Manager/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Runbook library/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Policies/)).not.toBeInTheDocument();
   });
 
-  it('agent approves storage scenario from detail: execution starts', () => {
-    const t = demo('A');
-    renderAt(`/incidents/${t.id}`);
-    fireEvent.click(screen.getByTestId('approve'));
-    expect(useStore.getState().state.tickets[t.id].status).toBe('EXECUTING');
+  it('employee raises a ticket and immediately gets the first guided question', () => {
+    setRole('EMPLOYEE');
+    renderAt('/raise');
+    fireEvent.click(screen.getByLabelText(/Unable to connect to Wi-Fi/));
+    fireEvent.change(screen.getByLabelText(/Describe what is happening/), { target: { value: 'Drops every few minutes' } });
+    fireEvent.click(screen.getByTestId('submit-ticket'));
+    expect(screen.getByTestId('ts-prompt')).toHaveTextContent('Is Wi-Fi turned on on your laptop?');
   });
 
-  it('agent cannot approve the HIGH-risk OS patch (disabled with reason)', () => {
-    const t = demo('C');
-    renderAt(`/incidents/${t.id}`);
-    expect(screen.getByTestId('approve')).toBeDisabled();
-    expect(screen.getAllByText(/HIGH-risk plans require an Admin approver/).length).toBeGreaterThan(0);
+  it('admin pages are not shown in the employee portal (and vice versa)', () => {
+    setRole('EMPLOYEE');
+    renderAt('/approvals');
+    expect(screen.getByText(/Switch role to open this page/)).toBeInTheDocument();
   });
 
-  it('manager role is read-only', () => {
-    act(() => { useStore.getState().dispatch({ type: 'SET_ROLE', role: 'MANAGER' }); });
-    const t = demo('A');
-    renderAt(`/incidents/${t.id}`);
-    expect(screen.getByTestId('approve')).toBeDisabled();
-    expect(screen.getByTestId('create-ticket')).toBeDisabled();
+  it('workspace defaults to All action required, not Overdue', () => {
+    setRole('ADMIN');
+    renderAt('/workspace');
+    expect(screen.getByTestId('filter-ALL')).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByTestId('filter-OVERDUE')).toHaveAttribute('aria-selected', 'false');
   });
 
-  it('unknown route shows friendly not-found', () => {
-    renderAt('/does-not-exist');
-    expect(screen.getByText('Page not found')).toBeInTheDocument();
-  });
-
-  it('policies page is read-only for agents and shows computed route matrix', () => {
-    renderAt('/policies');
-    expect(screen.getByText('Live route matrix')).toBeInTheDocument();
-    expect(screen.getByTestId('save-policy')).toBeDisabled();
+  it('AI settings show approval and verification as always on', () => {
+    setRole('ADMIN');
+    renderAt('/settings');
+    expect(screen.getAllByText('Always on')).toHaveLength(2);
   });
 });

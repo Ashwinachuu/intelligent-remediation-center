@@ -5,39 +5,29 @@ export class DomainError extends Error {
   constructor(public code: ErrorCode, message: string) { super(message); this.name = 'DomainError'; }
 }
 
-const GATE: Status[] = ['AWAITING_APPROVAL', 'AWAITING_CONSENT', 'WAITING_DEVICE', 'SCHEDULED', 'READY', 'REVIEW_REQUIRED', 'ESCALATED', 'DIAGNOSING'];
-/** Central transition table (Spec §7). Anything not listed is illegal. */
+const GATE: Status[] = ['AWAITING_APPROVAL', 'AWAITING_CONSENT', 'WAITING_DEVICE', 'READY', 'REVIEW_REQUIRED', 'ESCALATED', 'DIAGNOSING'];
+/** Central internal transition table. Anything not listed is illegal. */
 export const TRANSITIONS: Record<Status, Status[]> = {
-  OPEN: ['DIAGNOSING', 'ESCALATED'],
-  REOPENED: ['DIAGNOSING', 'ESCALATED'],
-  DIAGNOSING: ['REVIEW_REQUIRED', 'AWAITING_APPROVAL', 'AWAITING_CONSENT', 'WAITING_DEVICE', 'SCHEDULED', 'READY', 'ESCALATED'],
+  OPEN: ['SELF_SERVICE', 'DIAGNOSING', 'ESCALATED'],
+  SELF_SERVICE: ['DIAGNOSING', 'CLOSED'],
+  REOPENED: ['DIAGNOSING', 'ESCALATED', 'RESOLVED'],
+  DIAGNOSING: ['REVIEW_REQUIRED', 'AWAITING_APPROVAL', 'AWAITING_CONSENT', 'WAITING_DEVICE', 'READY', 'ESCALATED'],
   REVIEW_REQUIRED: ['DIAGNOSING', 'ESCALATED', 'RESOLVED'],
   AWAITING_APPROVAL: GATE.filter((s) => s !== 'AWAITING_APPROVAL'),
   AWAITING_CONSENT: GATE.filter((s) => s !== 'AWAITING_CONSENT'),
   WAITING_DEVICE: GATE.filter((s) => s !== 'WAITING_DEVICE'),
-  SCHEDULED: GATE.filter((s) => s !== 'SCHEDULED'),
   READY: [...GATE.filter((s) => s !== 'READY'), 'EXECUTING'],
-  EXECUTING: ['VERIFYING', 'ROLLBACK_AVAILABLE', 'ESCALATED', 'AWAITING_APPROVAL', 'REVIEW_REQUIRED', 'WAITING_DEVICE', 'AWAITING_CONSENT', 'STEP_APPROVAL'],
-  STEP_APPROVAL: ['EXECUTING', 'ESCALATED', 'DIAGNOSING', 'REVIEW_REQUIRED', 'WAITING_DEVICE', 'AWAITING_APPROVAL'],
+  EXECUTING: ['VERIFYING', 'ROLLBACK_AVAILABLE', 'ESCALATED', 'AWAITING_APPROVAL', 'WAITING_DEVICE', 'REVIEW_REQUIRED'],
   VERIFYING: ['RESOLVED', 'ROLLBACK_AVAILABLE', 'ESCALATED'],
   ROLLBACK_AVAILABLE: ['ROLLING_BACK', 'ESCALATED'],
   ROLLING_BACK: ['ESCALATED'],
   RESOLVED: ['CLOSED', 'ROLLING_BACK', 'REOPENED'],
   CLOSED: ['ROLLING_BACK', 'REOPENED'],
-  ESCALATED: ['RESOLVED'],
+  ESCALATED: ['RESOLVED', 'DIAGNOSING'],
 };
 export const canTransition = (from: Status, to: Status) => TRANSITIONS[from].includes(to);
 export function assertTransition(from: Status, to: Status) {
   if (!canTransition(from, to)) throw new DomainError('ILLEGAL_TRANSITION', `Illegal transition ${from} → ${to}`);
 }
-
-export const GATE_STATES: Status[] = ['AWAITING_APPROVAL', 'AWAITING_CONSENT', 'WAITING_DEVICE', 'SCHEDULED', 'READY'];
+export const GATE_STATES: Status[] = ['AWAITING_APPROVAL', 'AWAITING_CONSENT', 'WAITING_DEVICE', 'READY'];
 export const RUNNING_STATES: Status[] = ['EXECUTING', 'VERIFYING', 'ROLLING_BACK'];
-export const ESCALATABLE: Status[] = ['OPEN', 'REOPENED', 'REVIEW_REQUIRED', 'AWAITING_APPROVAL', 'AWAITING_CONSENT', 'WAITING_DEVICE', 'SCHEDULED', 'READY', 'ROLLBACK_AVAILABLE', 'STEP_APPROVAL'];
-
-export const STATUS_LABEL: Record<Status, string> = {
-  OPEN: 'Open', DIAGNOSING: 'Diagnosing', REVIEW_REQUIRED: 'Review required', AWAITING_APPROVAL: 'Awaiting approval',
-  AWAITING_CONSENT: 'Awaiting consent', WAITING_DEVICE: 'Waiting for device', SCHEDULED: 'Scheduled', READY: 'Ready',
-  EXECUTING: 'Executing', VERIFYING: 'Verifying', ROLLBACK_AVAILABLE: 'Rollback available', ROLLING_BACK: 'Rolling back',
-  ESCALATED: 'Escalated', RESOLVED: 'Resolved', CLOSED: 'Closed', REOPENED: 'Reopened', STEP_APPROVAL: 'Awaiting step approval',
-};

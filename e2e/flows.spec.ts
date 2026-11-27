@@ -8,358 +8,187 @@ async function fresh(page: Page) {
   await page.goto('/#/overview');
   await page.evaluate(() => localStorage.clear());
   await page.reload();
-  await expect(page.getByRole('heading', { name: 'Endpoint remediation overview' })).toBeVisible();
-}
-const status = (page: Page) => page.locator('.detail-head [data-status]');
-async function role(page: Page, r: 'AGENT' | 'ADMIN' | 'MANAGER') { await page.selectOption('#role-select', r); }
-async function loadScenario(page: Page, name: string) {
-  await page.goto('/#/incidents');
-  await page.getByRole('button', { name, exact: true }).click();
-  await expect(page.locator('.detail-head h1')).toBeVisible();
-  return (await page.locator('.detail-head h1').textContent())!.trim();
+  await expect(page.getByRole('heading', { level: 1, name: 'Overview' })).toBeVisible();
 }
 test.afterEach(() => { expect(errors, errors.join('\n')).toEqual([]); });
 
-test('1. storage ticket: explain → approve → verified closure → dashboard + audit', async ({ page }) => {
+const adminStatus = (page: Page) => page.locator('.detail-head [data-status]');
+const empStatus = (page: Page) => page.getByTestId('employee-status');
+async function scenario(page: Page, key: string) {
+  await page.getByTestId('demo-menu').click();
+  await page.getByTestId(`scenario-${key}`).click();
+}
+async function answer(page: Page, answers: string[]) {
+  for (const a of answers) {
+    const btn = page.locator(`[data-answer="${a}"]`);
+    await expect(btn).toBeEnabled();
+    await btn.click();
+  }
+}
+const ticketIdFromUrl = (page: Page) => page.url().split('/').pop()!;
+async function asAdmin(page: Page, id: string) { await page.getByTestId('role-admin').click(); await page.goto(`/#/incidents/${id}`); }
+async function asEmployee(page: Page, id: string) { await page.getByTestId('role-employee').click(); await page.goto(`/#/my-tickets/${id}`); }
+async function kpi(page: Page, testid: string) { return Number(await page.getByTestId(testid).locator('.value').textContent()); }
+
+test('Scenario 1 — employee self-service closes without admin approval; dashboard updates', async ({ page }) => {
   await fresh(page);
   await page.goto('/#/overview?preset=today');
   await expect(page.getByRole('button', { name: 'Today' })).toHaveAttribute('aria-pressed', 'true');
-  const before = Number(await page.locator('.kpi', { hasText: 'Human-approved closed' }).locator('.value').textContent());
-  await page.getByTestId('create-ticket').click();
-  await page.getByRole('dialog').getByLabel('Title *').fill('Disk nearly full on my laptop');
-  await page.getByTestId('submit-ticket').click();
-  await expect(status(page)).toHaveAttribute('data-status', 'AWAITING_APPROVAL');
-  await expect(page.getByText(/Free disk space 3 GB is below the 10 GB/).first()).toBeVisible();
-  await expect(page.getByText('RB-001 v1').first()).toBeVisible();
-  const id = (await page.locator('.detail-head h1').textContent())!.trim();
-  await page.getByTestId('approve').click();
-  await expect(status(page)).toHaveAttribute('data-status', 'CLOSED', { timeout: 15000 });
-  await expect(page.getByText(/Actual verification output/)).toBeVisible();
+  const before = await kpi(page, 'kpi-selfservice');
+  await scenario(page, '1');
+  await expect(page.getByTestId('ts-prompt')).toHaveText('When did the slowness start?');
+  await answer(page, ['TODAY', 'WHOLE']);
+  await expect(page.getByTestId('ts-prompt')).toHaveText('Have you restarted your laptop in the last 24 hours?');
+  await answer(page, ['NO', 'YES', 'COMPLETED', 'COMPLETED', 'COMPLETED', 'RESOLVED']);
+  await expect(empStatus(page)).toHaveText('Resolved');
+  await expect(page.getByText('Employee self-service').first()).toBeVisible();
+  const id = ticketIdFromUrl(page);
+  await asAdmin(page, id);
+  await expect(adminStatus(page)).toHaveAttribute('data-status', 'CLOSED');
+  await expect(page.locator('[data-approval="NOT_REQUIRED"]')).toBeVisible();
   await page.goto('/#/overview?preset=today');
-  await expect(page.locator('.kpi', { hasText: 'Human-approved closed' }).locator('.value')).toHaveText(String(before + 1));
-  await page.goto(`/#/audit?q=${id}`);
-  for (const a of ['approved', 'execution started', 'verification passed', 'ticket closed']) await expect(page.locator('td', { hasText: new RegExp(`^${a}$`) }).first()).toBeVisible();
+  await expect(page.getByTestId('kpi-selfservice').locator('.value')).toHaveText(String(before + 1));
 });
 
-test('2. admin enables preapproval → storage auto-closes; medium still needs approval', async ({ page }) => {
+test('Scenario 2 — failed self-service escalates the same ticket; admin approves; AI executes and verifies', async ({ page }) => {
   await fresh(page);
-  await role(page, 'ADMIN');
-  await page.goto('/#/policies');
-  await page.getByTestId('preapproval').click();
-  await page.getByTestId('confirm-preapproval').click();
-  await page.getByLabel('Reason for this version (required)').fill('Pilot preapproval for low-risk catalog runbooks');
-  await page.getByTestId('save-policy').click();
-  await expect(page.getByText(/Current version: v2/)).toBeVisible();
-  await loadScenario(page, 'A · Storage cleanup');
-  await expect(status(page)).toHaveAttribute('data-status', 'CLOSED', { timeout: 15000 });
-  await expect(page.locator('.detail-head').getByText('Auto (policy)')).toBeVisible();
-  await loadScenario(page, 'B · Wi-Fi failure');
-  await expect(status(page)).toHaveAttribute('data-status', 'AWAITING_APPROVAL');
-});
-
-test('3. Wi-Fi: approve → consent required → employee grants → verified closure', async ({ page }) => {
-  await fresh(page);
-  await loadScenario(page, 'B · Wi-Fi failure');
-  await expect(page.getByTestId('approve')).toHaveText(/Approve & request consent/);
+  await scenario(page, '2');
+  await answer(page, ['YES', 'YES', 'YES', 'YES']);
+  await expect(empStatus(page)).toHaveText('Sent to IT support');
+  const id = ticketIdFromUrl(page);
+  await asAdmin(page, id);
+  await expect(adminStatus(page)).toHaveAttribute('data-status', 'REVIEW_NEEDED');
+  await expect(page.getByText('Is Wi-Fi turned on on your laptop?').first()).toBeVisible();
+  await expect(page.getByText('Reset Wi-Fi adapter and renew network settings').first()).toBeVisible();
   await page.getByTestId('approve').click();
-  await expect(status(page)).toHaveAttribute('data-status', 'AWAITING_CONSENT');
-  await page.getByTestId('consent-grant').click();
-  await expect(status(page)).toHaveAttribute('data-status', 'CLOSED', { timeout: 15000 });
+  await expect(page.getByTestId('confirm-approve')).toBeDisabled();
+  await page.getByTestId('ack').check();
+  await page.getByTestId('confirm-approve').click();
+  await expect(adminStatus(page)).toHaveAttribute('data-status', 'REMEDIATION');
+  await asEmployee(page, id);
+  await page.getByTestId('consent-yes').click();
+  await expect(empStatus(page)).toHaveText('Resolved', { timeout: 15000 });
+  await asAdmin(page, id);
+  await expect(adminStatus(page)).toHaveAttribute('data-status', 'CLOSED');
+  await expect(page.locator('[data-method="HUMAN_APPROVED"]')).toBeVisible();
+  await expect(page.getByTestId('verify-state')).toHaveText('Passed');
 });
 
-test('4. high-risk OS: agent blocked → admin approves + schedule → consent → advance → closed', async ({ page }) => {
+test('Scenario 3 — unsupported issue resolved manually becomes validated knowledge used for the next similar ticket', async ({ page }) => {
   await fresh(page);
-  await loadScenario(page, 'C · OS patch');
-  await expect(page.getByTestId('approve')).toBeDisabled();
-  await expect(page.getByText('HIGH-risk plans require an Admin approver').first()).toBeVisible();
-  await role(page, 'ADMIN');
-  await page.getByTestId('approve').click();
-  await expect(page.getByTestId('confirm-schedule')).toBeDisabled();
-  await page.getByTestId('impact-confirm').check();
-  await page.getByTestId('confirm-schedule').click();
-  await expect(status(page)).toHaveAttribute('data-status', 'AWAITING_CONSENT');
-  await page.getByTestId('consent-grant').click();
-  await expect(status(page)).toHaveAttribute('data-status', 'SCHEDULED');
-  await page.getByTestId('advance').click();
-  // Multi-step plan: read-only steps auto-run, then the HIGH-risk install pauses for a step approval.
-  await expect(status(page)).toHaveAttribute('data-status', 'STEP_APPROVAL', { timeout: 15000 });
-  await page.getByTestId('approve-step').click();
-  await page.getByTestId('step-impact-confirm').check();
-  await page.getByTestId('confirm-step').click();
-  await expect(status(page)).toHaveAttribute('data-status', 'CLOSED', { timeout: 15000 });
-});
-
-test('5. Wi-Fi verification failure → no closure → rollback → escalated, snapshot restored', async ({ page }) => {
-  await fresh(page);
-  await loadScenario(page, 'D · Wi-Fi verification failure');
-  await page.getByTestId('approve').click();
-  await page.getByTestId('consent-grant').click();
-  await expect(status(page)).toHaveAttribute('data-status', 'ROLLBACK_AVAILABLE', { timeout: 15000 });
-  await expect(page.locator('.detail-head dd', { hasText: /^—$/ }).first()).toBeVisible();
-  await page.getByTestId('rollback').click();
-  await expect(status(page)).toHaveAttribute('data-status', 'ESCALATED', { timeout: 15000 });
-  const row = page.locator('table.change-table tbody tr', { hasText: 'Wi-Fi healthy' });
-  await expect(row.locator('td').nth(1)).toHaveText('false');
-  await expect(row.locator('td').nth(3)).toHaveText('false');
-});
-
-test('6. unknown crash → no execution → manual resolution → draft, not active', async ({ page }) => {
-  await fresh(page);
-  await loadScenario(page, 'E · Unknown crash');
-  await expect(status(page)).toHaveAttribute('data-status', 'REVIEW_REQUIRED');
-  await expect(page.getByTestId('approve')).toHaveCount(0);
+  await scenario(page, '3');
+  await answer(page, ['NO', 'COMPLETED', 'COMPLETED', 'PERSISTS']);
+  const id = ticketIdFromUrl(page);
+  await asAdmin(page, id);
+  await expect(adminStatus(page)).toHaveAttribute('data-status', 'UNSUPPORTED');
   await page.getByTestId('resolve-manual').click();
-  await page.getByLabel('Resolution note (required)').fill('Reset export plugin cache and reinstalled plugin');
-  await page.getByLabel('Verification evidence (required)').fill('Exported 5 files without crash');
-  await page.getByRole('checkbox', { name: /I verified the fix/ }).check();
-  await page.getByTestId('confirm-manual').click();
-  await expect(status(page)).toHaveAttribute('data-status', 'CLOSED');
-  await page.getByRole('button', { name: 'Propose runbook draft' }).click();
-  await expect(page).toHaveURL(/#\/library\/RB-/);
-  await expect(page.locator('.page-head').getByText('Draft', { exact: true })).toBeVisible();
-  await expect(page.getByText('No — guidance only (L1)')).toBeVisible();
+  await page.getByLabel('Root cause *').fill('Outdated dock firmware');
+  await page.getByLabel('What you did to fix it *').fill('Updated the dock firmware to 2.4');
+  await page.getByLabel('How you verified it *').fill('No flicker for 30 minutes');
+  await expect(page.getByTestId('save-knowledge')).toBeChecked();
+  await page.getByTestId('k-pattern').fill('external monitor flicker dock');
+  await page.getByTestId('k-admin-steps').fill('Push dock firmware 2.4');
+  await page.getByTestId('confirm-resolve').click();
+  await expect(adminStatus(page)).toHaveAttribute('data-status', 'CLOSED');
+  await expect(page.getByTestId('knowledge-status')).toContainText('waiting for validation');
+  await page.goto('/#/opportunities');
+  await page.getByTestId('review-K-002').click();
+  await page.getByTestId('validate-knowledge').click();
+  await expect(page.getByTestId('knowledge').locator('tr', { hasText: 'K-002' })).toContainText('Validated');
+  await scenario(page, '3b');
+  await expect(page.getByText('Fix that worked for a similar issue')).toBeVisible();
+  await page.getByTestId('get-help').click();
+  const id2 = ticketIdFromUrl(page);
+  await asAdmin(page, id2);
+  await expect(adminStatus(page)).toHaveAttribute('data-status', 'REVIEW_NEEDED');
+  await expect(page.getByText('From validated resolution K-002')).toBeVisible();
 });
 
-test('7. offline → reconnect → approval required; pause blocks start without mutation', async ({ page }) => {
+test('Scenario 4 — approved fix fails verification; rollback; incident stays open; audit has the sequence', async ({ page }) => {
   await fresh(page);
-  await loadScenario(page, 'F · Offline Wi-Fi');
-  await expect(status(page)).toHaveAttribute('data-status', 'WAITING_DEVICE');
-  await page.getByRole('button', { name: 'Simulate device reconnect' }).click();
-  await expect(status(page)).toHaveAttribute('data-status', 'AWAITING_APPROVAL');
-  await role(page, 'ADMIN');
-  await page.goto('/#/policies');
-  await page.getByRole('switch', { name: /Master pause/ }).check();
-  await page.getByLabel('Reason for this version (required)').fill('Change freeze');
-  await page.getByTestId('save-policy').click();
-  await loadScenario(page, 'A · Storage cleanup');
-  await expect(status(page)).toHaveAttribute('data-status', 'REVIEW_REQUIRED');
-  await expect(page.getByText(/Automation paused by policy/).first()).toBeVisible();
-  await page.getByRole('tab', { name: 'Summary' }).click();
-  await expect(page.locator('.kv dd', { hasText: '3 GB' })).toBeVisible();
-});
-
-test('8. reopen closed incident → dashboard updates, execution audit retained', async ({ page }) => {
-  await fresh(page);
-  await loadScenario(page, 'A · Storage cleanup');
+  await scenario(page, '4');
+  await expect(adminStatus(page)).toHaveAttribute('data-status', 'REVIEW_NEEDED');
+  const id = ticketIdFromUrl(page);
+  const displayId = (await page.locator('.detail-head h1').textContent())!.trim();
   await page.getByTestId('approve').click();
-  await expect(status(page)).toHaveAttribute('data-status', 'CLOSED', { timeout: 15000 });
-  const url = page.url();
-  await page.goto('/#/overview?preset=today');
-  await expect(page.getByRole('button', { name: 'Today' })).toHaveAttribute('aria-pressed', 'true');
-  const other = page.locator('.bar-list a', { hasText: 'Other open / reopened' }).locator('.n');
-  const before = Number(await other.textContent());
-  await page.goto(url);
-  await page.getByRole('button', { name: 'Reopen' }).click();
-  await page.getByLabel('Reason (required)').fill('Disk filled again');
-  await page.getByRole('button', { name: 'Confirm' }).click();
-  await expect(status(page)).toHaveAttribute('data-status', 'REOPENED');
-  await page.getByRole('tab', { name: /Activity/ }).click();
-  await expect(page.getByText('execution started')).toBeVisible();
-  await page.goto('/#/overview?preset=today');
-  await expect(other).toHaveText(String(before + 1));
+  await page.getByTestId('ack').check();
+  await page.getByTestId('confirm-approve').click();
+  await asEmployee(page, id);
+  await page.getByTestId('consent-yes').click();
+  await asAdmin(page, id);
+  await expect(page.getByTestId('verify-state')).toHaveText('Failed', { timeout: 15000 });
+  await expect(adminStatus(page)).toHaveAttribute('data-status', 'MANUAL');
+  await page.getByTestId('rollback').click();
+  await expect(page.locator('div.small', { hasText: 'Rollback by' })).toContainText('Previous settings restored', { timeout: 15000 });
+  await expect(adminStatus(page)).toHaveAttribute('data-status', 'MANUAL');
+  await page.goto(`/#/audit?q=${displayId}`);
+  for (const a of ['approved', 'employee consent granted', 'verification failed', 'rollback started', 'rollback completed']) await expect(page.locator('td', { hasText: new RegExp(`^${a}$`) }).first()).toBeVisible();
 });
 
-test('9. manager read-only; policy change invalidates pending approval; refresh preserves state', async ({ page }) => {
+test('Scenario 5 — employee reopens a resolved ticket; admin worklist updates', async ({ page }) => {
   await fresh(page);
-  const id = await loadScenario(page, 'B · Wi-Fi failure');
-  const url = page.url();
-  await role(page, 'MANAGER');
-  await expect(page.getByTestId('approve')).toBeDisabled();
-  await expect(page.getByTestId('create-ticket')).toBeDisabled();
-  await role(page, 'AGENT');
-  await page.getByTestId('approve').click();
-  await expect(status(page)).toHaveAttribute('data-status', 'AWAITING_CONSENT');
-  await role(page, 'ADMIN');
-  await page.goto('/#/policies');
-  await page.getByLabel('Approval expiry (min)').fill('45');
-  await page.getByLabel('Reason for this version (required)').fill('Shorter approval window');
-  await expect(page.getByText(/outstanding approval\(s\) will be invalidated/)).toBeVisible();
-  await page.getByTestId('save-policy').click();
-  await page.goto(url);
-  await expect(status(page)).toHaveAttribute('data-status', 'AWAITING_APPROVAL');
-  await page.reload();
-  await expect(status(page)).toHaveAttribute('data-status', 'AWAITING_APPROVAL');
-  await expect(page.locator('.detail-head h1')).toHaveText(id);
-  await page.goto('/#/approvals?tab=expired');
-  await expect(page.getByText(/Plan changed/).first()).toBeVisible();
+  await scenario(page, '5');
+  await expect(empStatus(page)).toHaveText('Resolved');
+  const id = ticketIdFromUrl(page);
+  await page.getByTestId('reopen').click();
+  await page.getByLabel(/What’s still wrong/).fill('Disk full again after lunch');
+  await page.getByTestId('confirm-reopen').click();
+  await expect(empStatus(page)).toHaveText('Sent to IT support');
+  await page.getByTestId('role-admin').click();
+  await page.goto('/#/workspace?q=INVESTIGATION');
+  await expect(page.getByTestId('action-queue').locator('a', { hasText: 'Low disk space warning' })).toContainText('reopened');
+  await page.goto(`/#/incidents/${id}`);
+  await expect(adminStatus(page)).toHaveAttribute('data-status', 'REOPENED');
+  await page.getByTestId('rediagnose').click();
+  await expect(adminStatus(page)).toHaveAttribute('data-status', 'REVIEW_NEEDED');
 });
 
-test('10. every route navigates, filters reset, mobile usable, no console errors', async ({ page }) => {
+test('Admin can reject or investigate instead of approving; nothing executes', async ({ page }) => {
   await fresh(page);
-  for (const [label, heading] of [['How it works', 'How it works'], ['Incidents', 'Incidents'], ['Approvals', 'Approvals'], ['Runbook library', 'Runbook library'], ['Opportunities', 'Automation opportunities'], ['Policies', 'Policies'], ['Audit log', 'Audit log'], ['Overview', 'Endpoint remediation overview']]) {
+  await page.goto('/#/approvals');
+  await page.getByTestId('approval-queue').locator('tbody tr').first().click();
+  await page.getByTestId('reject').click();
+  await page.getByLabel('Reason (required)').fill('Change freeze');
+  await page.getByTestId('confirm-decision').click();
+  await expect(adminStatus(page)).toHaveAttribute('data-status', 'MANUAL');
+  await expect(page.locator('[data-approval="REJECTED"]')).toBeVisible();
+  await page.goto('/#/approvals');
+  await expect(page.getByText('No fixes are waiting for approval')).toBeVisible();
+});
+
+test('KPI drill-downs reconcile; settings and audit filters work', async ({ page }) => {
+  await fresh(page);
+  const total = await kpi(page, 'kpi-total');
+  await page.getByTestId('kpi-total').click();
+  await expect(page.getByText(`${total} incident${total === 1 ? '' : 's'}`, { exact: true })).toBeVisible();
+  await page.goto('/#/overview');
+  const manual = await kpi(page, 'kpi-manual');
+  await page.getByTestId('kpi-manual').click();
+  await expect(page.getByTestId('incident-table').locator('tbody tr')).toHaveCount(manual);
+  await page.goto('/#/settings');
+  await page.getByTestId('threshold').fill('90');
+  await page.getByTestId('settings-reason').fill('Stricter during pilot');
+  await page.getByTestId('save-settings').click();
+  await expect(page.locator('li', { hasText: /v2 ·.*threshold 90%/ })).toBeVisible();
+  await page.goto('/#/audit');
+  await page.getByLabel('Action').selectOption('AI_SETTINGS_CHANGED');
+  await expect(page.locator('tbody tr')).toHaveCount(1);
+});
+
+test('Every route works for both roles; mobile layouts have no horizontal overflow', async ({ page }) => {
+  await fresh(page);
+  for (const [label, heading] of [['My Workspace', 'My Workspace'], ['Incidents', 'Incidents'], ['Approvals', 'Approvals'], ['Opportunities', 'Opportunities'], ['Audit Logs', 'Audit Logs'], ['AI Settings', 'AI Settings'], ['Overview', 'Overview']]) {
     await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: label }).click();
     await expect(page.getByRole('heading', { level: 1, name: heading })).toBeVisible();
   }
-  await page.goto('/#/library/RB-004');
-  await expect(page.getByRole('heading', { name: 'RB-004 v1' })).toBeVisible();
+  await page.getByTestId('role-employee').click();
+  await expect(page.getByRole('heading', { level: 1, name: 'My tickets' })).toBeVisible();
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Raise a Ticket' }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'Raise a ticket' })).toBeVisible();
   await page.goto('/#/nowhere');
   await expect(page.getByText('Page not found')).toBeVisible();
-  // metric drill-down + filters
-  await page.goto('/#/overview');
-  await page.locator('.kpi', { hasText: 'Auto-closed' }).click();
-  await expect(page.getByText(/predicate: status = Closed AND path = Auto/)).toBeVisible();
-  await page.goBack();
-  await expect(page.getByRole('heading', { name: 'Endpoint remediation overview' })).toBeVisible();
-  await page.goto('/#/incidents');
-  await page.getByLabel('Status').selectOption('ESCALATED');
-  await expect(page).toHaveURL(/status=ESCALATED/);
-  await page.getByRole('button', { name: 'Clear filters' }).click();
-  await expect(page).not.toHaveURL(/status=/);
-  // mobile
   await page.setViewportSize({ width: 375, height: 812 });
-  for (const r of ['overview', 'guide', 'incidents', 'approvals', 'policies', 'audit', 'library', 'opportunities']) {
-    await page.goto(`/#/${r}`);
-    await expect(page.locator('h1').first()).toBeVisible();
-    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
-    expect(overflow, `horizontal overflow on ${r}`).toBeLessThanOrEqual(1);
-  }
-  await page.getByRole('button', { name: 'Open navigation' }).click();
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Incidents' }).click();
-  await expect(page.getByRole('heading', { level: 1, name: 'Incidents' })).toBeVisible();
-});
-
-// ------------------------------------------------------------------------------------------
-// Enhancement flows (docs/ENHANCEMENTS.md)
-// ------------------------------------------------------------------------------------------
-async function demoId(page: Page, scenario: string) {
-  return page.evaluate((sc) => { const s = JSON.parse(localStorage.getItem('remediation-center:v1')!); return (Object.values(s.tickets) as { id: string; scenario?: string; demo?: boolean; createdAt: string }[]).filter((t) => t.demo && t.scenario === sc).sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0].id; }, scenario);
-}
-
-test('E1. workspace: prioritized queue item opens the incident at its action', async ({ page }) => {
-  await fresh(page);
-  await expect(page.getByTestId('workspace-tiles')).toBeVisible();
-  const first = page.getByTestId('action-queue').locator('a').first();
-  const title = (await first.locator('.aq-title strong').textContent())!.trim();
-  await first.click();
-  await expect(page.locator('.detail-head h1')).toHaveText(title);
-  await expect(page.locator('#action-card')).toBeInViewport();
-  await page.goto('/#/overview');
-  await page.getByRole('link', { name: /AI remediation in progress/ }).click();
-  await expect(page.getByText(/predicate: status ∈ \{Ready, Scheduled/)).toBeVisible();
-});
-
-test('E2. preflight blocks execution on low battery and records results', async ({ page }) => {
-  await fresh(page);
-  await loadScenario(page, 'B · Wi-Fi failure');
-  await page.getByTestId('battery-toggle').click();
-  await page.getByTestId('approve').click();
-  await page.getByTestId('consent-grant').click();
-  await expect(status(page)).toHaveAttribute('data-status', 'WAITING_DEVICE');
-  await expect(page.locator('[data-check="battery"]')).toHaveAttribute('data-status', 'FAIL');
-  await expect(page.getByTestId('preflight-summary')).toContainText('Blocked');
-  await page.getByTestId('battery-toggle').click();
-  await expect(status(page)).toHaveAttribute('data-status', 'CLOSED', { timeout: 15000 });
-  await page.getByRole('tab', { name: /Activity/ }).click();
-  await expect(page.getByText('preflight passed').first()).toBeVisible();
-  await expect(page.getByText('preflight revalidated').first()).toBeVisible();
-});
-
-test('E3. multi-step plan paused at high-risk step: agent blocked, admin approves step', async ({ page }) => {
-  await fresh(page);
-  const id = await demoId(page, 'I');
-  await page.goto(`/#/incidents/${id}`);
-  await expect(status(page)).toHaveAttribute('data-status', 'STEP_APPROVAL');
-  await expect(page.locator('[data-step="S1"]')).toHaveAttribute('data-step-status', 'done');
-  await expect(page.locator('[data-step="S3"]')).toHaveAttribute('data-step-status', 'pause');
-  await expect(page.getByTestId('approve-step')).toBeDisabled();
-  await role(page, 'ADMIN');
-  await page.getByTestId('approve-step').click();
-  await expect(page.getByTestId('confirm-step')).toBeDisabled();
-  await page.getByTestId('step-impact-confirm').check();
-  await page.getByTestId('confirm-step').click();
-  await expect(status(page)).toHaveAttribute('data-status', 'CLOSED', { timeout: 15000 });
-});
-
-test('E4. employee chooses a maintenance window; response syncs to approvals', async ({ page }) => {
-  await fresh(page);
-  await loadScenario(page, 'B · Wi-Fi failure');
-  await page.getByTestId('approve').click();
-  await expect(page.getByText('Simulated employee view')).toBeVisible();
-  await page.getByTestId('consent-schedule').click();
-  await page.getByTestId('confirm-window').click();
-  await expect(status(page)).toHaveAttribute('data-status', 'SCHEDULED');
-  await page.getByRole('tab', { name: /Activity/ }).click();
-  await expect(page.getByText('employee response').first()).toBeVisible();
-  await page.getByRole('tab', { name: 'Remediation' }).click();
-  await page.getByTestId('advance').click();
-  await expect(status(page)).toHaveAttribute('data-status', 'CLOSED', { timeout: 15000 });
-});
-
-test('E5. shared network incident: correlate, link, resolve parent, verify each recovery', async ({ page }) => {
-  await fresh(page);
-  await page.getByTestId('cluster-banner').click();
-  await page.getByTestId('link-shared').click();
-  await expect(page.getByText(/linked and endpoint remediation paused/)).toBeVisible();
-  await expect(status(page)).toHaveAttribute('data-status', 'REVIEW_REQUIRED');
-  const child = page.url();
-  await page.getByRole('link', { name: /^INC-\d+$/ }).filter({ has: page.locator('strong') }).first().click();
-  await expect(page.locator('.detail-head h1')).toBeVisible();
-  await expect(status(page)).toHaveAttribute('data-status', 'ESCALATED');
-  await page.getByTestId('resolve-manual').click();
-  await page.getByLabel('Resolution note (required)').fill('Rebooted faulty access point on Floor 2');
-  await page.getByLabel('Verification evidence (required)').fill('AP healthy; 12 clients reassociated');
-  await page.getByRole('checkbox', { name: /I verified the fix/ }).check();
-  await page.getByTestId('confirm-manual').click();
-  await page.goto(child);
-  await expect(status(page)).toHaveAttribute('data-status', 'REVIEW_REQUIRED');
-  await page.getByTestId('verify-recovery').click();
-  await expect(status(page)).toHaveAttribute('data-status', 'CLOSED');
-});
-
-test('E6. AI draft lifecycle and maturity promotion require administrator validation', async ({ page }) => {
-  await fresh(page);
-  await loadScenario(page, 'E · Unknown crash');
-  await page.getByTestId('resolve-manual').click();
-  await page.getByLabel('Resolution note (required)').fill('Reset export plugin cache');
-  await page.getByLabel('Verification evidence (required)').fill('Exported 5 files');
-  await page.getByRole('checkbox', { name: /I verified the fix/ }).check();
-  await page.getByTestId('confirm-manual').click();
-  await page.getByRole('button', { name: 'Propose runbook draft' }).click();
-  await expect(page.getByText('AI-generated (simulated)')).toBeVisible();
-  await expect(page.getByTestId('submit-review')).toBeDisabled();
-  await page.getByRole('button', { name: 'Edit draft' }).click();
-  await page.getByLabel('Tested scenario').fill('Scenario E replay in simulator');
-  await page.getByTestId('save-draft').click();
-  await page.getByTestId('submit-review').click();
-  await expect(page.getByTestId('publish')).toBeDisabled();
-  await role(page, 'ADMIN');
-  await page.getByTestId('publish').click();
-  await page.getByLabel('Review note').fill('Reviewed with desktop SMEs');
-  await page.getByTestId('confirm-publish').click();
-  await expect(page.getByText('No — guidance only (L1)')).toBeVisible();
-  await page.goto('/#/library/RB-003');
-  await page.getByTestId('promote').click();
-  await page.getByLabel('Documented reason (required)').fill('3 supervised runs, all verified');
-  await page.getByTestId('confirm-maturity').click();
-  await expect(page.getByText('L3 · Policy-based autonomous').first()).toBeVisible();
-});
-
-test('E7. business impact recalculates from configurable assumptions', async ({ page }) => {
-  await fresh(page);
-  const row = page.getByTestId('impact-table').locator('tr', { hasText: 'IT operational cost savings' });
-  const before = await row.locator('td').nth(1).textContent();
-  await role(page, 'MANAGER');
-  await page.getByTestId('open-assumptions').click();
-  await page.getByTestId('hourly-cost').fill('80');
-  await page.getByTestId('save-assumptions').click();
-  await expect(row.locator('td').nth(1)).not.toHaveText(before!);
-  await expect(page.getByText('Estimated', { exact: true })).toBeVisible();
-});
-
-test('E8. How it works: every path is listed with a real example or a live try-it', async ({ page }) => {
-  await fresh(page);
-  await page.getByRole('link', { name: 'How it works →' }).click();
-  await expect(page.getByRole('heading', { level: 1, name: 'How it works' })).toBeVisible();
-  const rows = page.locator('tr[data-example]');
-  expect(await rows.count()).toBe(20);
-  // Each row either links to a seeded example ticket or offers a live way to try it.
-  for (let i = 0; i < 20; i++) expect(await rows.nth(i).locator('a, button, .muted').count()).toBeGreaterThan(0);
-  await page.locator('tr[data-example="rollback-fail"]').getByRole('link').click();
-  await expect(status(page)).toHaveAttribute('data-status', 'CLOSED');
-  await page.getByRole('tab', { name: /Activity/ }).click();
-  await expect(page.getByText('rollback failed').first()).toBeVisible();
-  await page.goto('/#/guide');
-  await page.locator('tr[data-example="verify-fail-rollback"]').getByRole('button', { name: /Try it/ }).click();
-  await expect(status(page)).toHaveAttribute('data-status', 'AWAITING_APPROVAL');
-  await expect(page.locator('.detail-head')).toContainText('Demo scenario D');
+  for (const r of ['raise', 'my-tickets']) { await page.goto(`/#/${r}`); await expect(page.locator('h1').first()).toBeVisible(); expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth), r).toBeLessThanOrEqual(1); }
+  await page.getByTestId('role-admin').click();
+  for (const r of ['overview', 'workspace', 'incidents', 'approvals', 'opportunities', 'audit', 'settings']) { await page.goto(`/#/${r}`); await expect(page.locator('h1').first()).toBeVisible(); expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth), r).toBeLessThanOrEqual(1); }
 });

@@ -2,20 +2,20 @@ import type { AppState } from '../domain/types';
 import { buildSeed } from './seed';
 
 export const STORAGE_KEY = 'remediation-center:v1';
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /** Shallow structural validation — rejects corrupt or incompatible payloads. */
 export function validateState(x: unknown): x is AppState {
   if (!x || typeof x !== 'object') return false;
   const s = x as Record<string, unknown>;
   if (s.schemaVersion !== SCHEMA_VERSION) return false;
-  const arrays = ['diagnoses', 'runbooks', 'policyHistory', 'approvals', 'executions', 'jobs', 'audit', 'notifications', 'stepApprovals'];
+  const arrays = ['diagnoses', 'runbooks', 'knowledge', 'settingsHistory', 'approvals', 'executions', 'audit', 'notifications'];
   if (!arrays.every((k) => Array.isArray(s[k]))) return false;
   if (!s.tickets || typeof s.tickets !== 'object' || !s.devices || typeof s.devices !== 'object') return false;
-  const p = s.policy as Record<string, unknown> | undefined;
-  if (!p || typeof p.version !== 'number' || typeof p.reviewThreshold !== 'number') return false;
+  const p = s.settings as Record<string, unknown> | undefined;
+  if (!p || typeof p.version !== 'number' || typeof p.confidenceThreshold !== 'number') return false;
   if (!s.seq || typeof (s.seq as Record<string, unknown>).ticket !== 'number') return false;
-  if (typeof s.anchor !== 'string' || !s.settings) return false;
+  if (typeof s.anchor !== 'string' || !s.ui) return false;
   for (const t of Object.values(s.tickets as Record<string, Record<string, unknown>>)) {
     if (typeof t.id !== 'string' || typeof t.status !== 'string' || typeof t.deviceId !== 'string' || !(t.deviceId in (s.devices as object))) return false;
   }

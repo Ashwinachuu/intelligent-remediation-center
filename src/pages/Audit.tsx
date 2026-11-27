@@ -3,7 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { Download, FilterX, ShieldQuestion } from 'lucide-react';
 import { useStore } from '../app/store';
 import { inRange } from '../domain/metrics';
-import { STATUS_LABEL } from '../domain/transitions';
+import { INTERNAL_LABEL as STATUS_LABEL } from '../domain/lifecycle';
 import type { AppState, AuditEvent } from '../domain/types';
 import { Empty, Modal, ResultIcon, TZ, fmtTime } from '../components/ui';
 
@@ -58,7 +58,7 @@ export function AuditPage() {
 
   return (
     <div>
-      <div className="page-head"><div><h1>Audit log</h1><p>Append-only event table (newest first). No edit or delete actions. Stored in browser localStorage — inspectable, <strong>not tamper-proof</strong>.</p></div>
+      <div className="page-head"><div><h1>Audit Logs</h1><p>Every ticket, troubleshooting answer, AI recommendation, approval, consent, execution, verification, rollback, resolution, knowledge and settings event — newest first. Read-only: no edit or delete. Stored in this browser, so inspectable but <strong>not tamper-proof</strong>.</p></div>
         <button className="btn" onClick={exportCsv} disabled={!rows.length}><Download size={14} aria-hidden />Export filtered CSV</button></div>
       <div className="filters" role="search">
         <label className="field wide">Search ticket / reason<input type="search" value={p.get('q') ?? ''} onChange={(e) => set('q', e.target.value)} placeholder="INC-1001" /></label>
@@ -96,9 +96,9 @@ export function AuditPage() {
             <dt>Before → after</dt><dd>{selected.from ? STATUS_LABEL[selected.from] : '—'} → {selected.to ? STATUS_LABEL[selected.to] : '—'}</dd>
             <dt>Decision reason</dt><dd>{selected.reason}</dd>
             <dt>Result</dt><dd>{selected.result}</dd>
-            <dt>Policy (current)</dt><dd>v{state.policy.version}{selected.metadata.policyVersion !== undefined && <> · event policy v{String(selected.metadata.policyVersion)}</>}</dd>
+            <dt>AI settings (current)</dt><dd>v{state.settings.version} · confidence threshold {state.settings.confidenceThreshold}%</dd>
             {diag && <><dt>Diagnosis</dt><dd>rev {diag.revision} · score {diag.confidence} · {diag.risk} · plan <span className="mono">{diag.planHash}</span> · {diag.runbookId ? <Link to={`/library/${diag.runbookId}`}>{diag.runbookId} v{diag.runbookVersion}</Link> : 'no runbook'}<ul className="small">{diag.evidence.map((x, i) => <li key={i}>{x}</li>)}</ul></dd></>}
-            {exec && <><dt>Execution</dt><dd><Link to={`/library/${exec.runbookId}`}>{exec.runbookId} v{exec.version}</Link> · {exec.phase} · authorization {exec.authorization.kind === 'APPROVAL' ? `approval by ${exec.authorization.actor} at ${fmtTime(exec.authorization.approvedAt)}` : `policy v${exec.authorization.policyVersion}`}<ul className="small">{[...exec.results, ...exec.rollbackResults].map((x, i) => <li key={i}>{x}</li>)}</ul></dd></>}
+            {exec && <><dt>Execution</dt><dd>{exec.runbookId} v{exec.version} · {exec.phase.toLowerCase().replace('_', ' ')} · approved by {exec.approvedBy}<ul className="small">{[...exec.results, ...exec.verificationOutput, ...exec.rollbackResults].map((x, i) => <li key={i}>{x}</li>)}</ul></dd></>}
             {ticket?.consent && <><dt>Consent (current)</dt><dd>{ticket.consent.granted ? 'Granted' : 'Denied'} at {fmtTime(ticket.consent.at)}</dd></>}
           </dl>
           <h3>Metadata</h3>

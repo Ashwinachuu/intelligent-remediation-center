@@ -1,393 +1,221 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { AlertTriangle, CalendarClock, CheckCircle2, CircleHelp, ClipboardCheck, FilePlus2, Info, Play, RotateCcw, ShieldAlert, Undo2, UserCheck, Wifi, WifiOff, XCircle, Clock, OctagonAlert, Search, Hourglass } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { Link, useParams } from 'react-router-dom';
+import { AlertTriangle, Bot, CheckCircle2, ChevronRight, CircleHelp, History, Loader2, MessageSquare, RefreshCw, Search, ShieldCheck, Undo2, Wrench, XCircle } from 'lucide-react';
 import { useStore } from '../app/store';
-import { CATEGORY_LABEL, EVIDENCE_KINDS, SIM_ACTIONS } from '../domain/catalog';
-import { activeExecution, attemptsForRevision, currentDiagnosis, deviceFieldLabel, gatesFor, latestAppliedExecution, pausedExecution, runbookOf, validStepApproval } from '../domain/engine';
+import { ISSUE_LABEL, employeeById } from '../domain/catalog';
+import { currentDiagnosis, deviceFieldLabel, gatesFor, latestAppliedExecution, runbookOf } from '../domain/engine';
+import { HIST_LABEL, similarIncidents } from '../domain/insights';
+import { approvalStatus, productStatus } from '../domain/lifecycle';
+import { fmtAge, savedForTicket, fmtMin } from '../domain/metrics';
 import { preflight } from '../domain/preflight';
-import { AssessmentPanel, CorrelationPanel, EmployeeConsentCard, PreflightPanel, SimilarIncidentsPanel, SlaBadge } from '../components/Insights';
-import { Battery, BatteryLow } from 'lucide-react';
-import { canRoleApprove } from '../domain/policy';
-import { ESCALATABLE, STATUS_LABEL } from '../domain/transitions';
-import type { AppState, Device, EvidenceKind, Execution, Role, Ticket } from '../domain/types';
-import { DisabledReason, Modal, PathBadge, ResultIcon, RiskBadge, ScoreBadge, StatusBadge, TZ, fmtShort, fmtTime } from '../components/ui';
-import { TelemetryPreview } from '../components/TicketCreator';
-import { MIN, ms } from '../domain/util';
+import type { AppState, Ticket } from '../domain/types';
+import { ApprovalBadge, ConfidenceBadge, DisabledReason, MethodBadge, Modal, ResultIcon, RiskBadge, SlaBadge, StatusBadge, fmtShort, fmtTime } from '../components/ui';
 import { NotFoundPage } from './NotFound';
 
-type Tab = 'summary' | 'remediation' | 'activity';
-
-function toLocalInput(t: number) {
-  const d = new Date(t); const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-export function rollbackInfo(s: AppState, t: Ticket, role: Role, now: number): { available: boolean; reason?: string; exec?: Execution } {
+function rollbackInfo(s: AppState, t: Ticket, now: number) {
   const e = latestAppliedExecution(s, t.id);
-  if (!e) return { available: false, reason: 'No device change has been applied' };
-  if (!['ROLLBACK_AVAILABLE', 'RESOLVED', 'CLOSED'].includes(t.status)) return { available: false, reason: `Rollback is not offered while ${STATUS_LABEL[t.status].toLowerCase()}`, exec: e };
-  if (!['PASSED', 'FAILED'].includes(e.phase)) return { available: false, reason: `Last execution is ${e.phase.toLowerCase().replace('_', ' ')}`, exec: e };
-  const rb = s.runbooks.find((r) => r.id === e.runbookId && r.version === e.version);
-  if (!e.reversible) return { available: false, reason: `Irreversible action — ${rb?.recoveryNote ?? ''}`, exec: e };
-  if (!e.rollbackDeadline || ms(e.rollbackDeadline) <= now) return { available: false, reason: 'Rollback deadline (30 min after action) has passed', exec: e };
-  if (role === 'MANAGER') return { available: false, reason: 'Manager role is read-only', exec: e };
-  if (e.risk === 'HIGH' && role !== 'ADMIN') return { available: false, reason: 'Rolling back a HIGH-risk action requires Admin', exec: e };
-  const dev = s.devices[e.deviceId];
-  const conflicts = e.changes.filter((c) => dev[c.field] !== c.after);
-  if (conflicts.length) return { available: false, reason: `Device changed since action (${conflicts.map((c) => deviceFieldLabel(c.field)).join(', ')}) — rollback refused`, exec: e };
-  return { available: true, exec: e };
+  if (!e || !['ROLLBACK_AVAILABLE', 'RESOLVED', 'CLOSED'].includes(t.status) || !['PASSED', 'FAILED'].includes(e.phase)) return { available: false as const, e };
+  if (!e.reversible) return { available: false as const, e, reason: `This fix can’t be rolled back — ${runbookOf(s, e)?.recoveryNote}` };
+  if (!e.rollbackDeadline || Date.parse(e.rollbackDeadline) <= now) return { available: false as const, e, reason: 'The 30-minute rollback window has passed' };
+  return { available: true as const, e };
 }
+const lines = (x: string) => x.split('\n').map((l) => l.trim()).filter(Boolean);
 
-function ScoreMeter({ score, review, approval, auto }: { score: number; review: number; approval: number; auto: number }) {
-  return (
-    <div>
-      <div className="score"><span className="big">{score}</span><span className="muted small">/ 100 simulated score · not a calibrated probability</span></div>
-      <div className="meter" role="img" aria-label={`Score ${score}; review threshold ${review}, approval ${approval}, auto ${auto}`}>
-        <div className="fill" style={{ width: `${score}%`, background: score >= approval ? 'var(--accent)' : score >= review ? 'var(--warning)' : 'var(--danger)' }} />
-        {[['Review', review], ['Approve', approval], ['Auto', auto]].map(([l, v]) => <div key={l as string} className="tick" style={{ left: `${v}%` }}><span>{l} {v}</span></div>)}
-      </div>
-    </div>
-  );
-}
-
-const STEP_TYPE: Record<string, string> = { DIAGNOSTIC: 'Read-only diagnostic', SNAPSHOT: 'Snapshot (read-only)', ACTION: 'Device change' };
-const APPROVAL_TEXT: Record<string, string> = { NONE: 'Auto (read-only)', PLAN: 'Covered by plan authorization', STEP: 'Explicit step approval' };
-function ExecutionView({ e, s, now }: { e: Execution; s: AppState; now: number }) {
-  const rb = runbookOf(s, e);
-  const defs = rb?.stepDefs ?? [];
-  const sa = validStepApproval(s, e, now);
-  const stateOf = (i: number): { cls: string; text: string } => {
-    if (e.results[i]) return e.results[i].includes('FAILED') || e.results[i].includes('stopped before mutation') ? { cls: 'fail', text: e.phase === 'CANCELLED' ? 'Stopped' : 'Failed' } : { cls: 'done', text: 'Completed' };
-    if (i === e.stepIndex) {
-      if (e.phase === 'AWAITING_STEP') return { cls: 'pause', text: 'Awaiting step approval' };
-      if (e.phase === 'RUNNING') return e.stepScheduledFor && Date.parse(e.stepScheduledFor) > now ? { cls: 'pause', text: `Scheduled ${fmtTime(e.stepScheduledFor)}` } : { cls: 'active', text: 'Running…' };
-      if (e.phase === 'CANCELLED') return { cls: 'fail', text: 'Cancelled — not executed' };
-    }
-    return { cls: '', text: e.phase === 'CANCELLED' || e.phase === 'FAILED' ? 'Not executed' : 'Pending' };
-  };
-  const verifying = e.phase === 'VERIFYING';
-  return (
-    <div className="stack">
-      <div className="row-between"><strong>Execution {e.id.slice(0, 8)} · {e.runbookId} v{e.version}</strong><span className="badge b-neutral">{e.phase === 'AWAITING_STEP' ? 'paused at step' : e.phase.replace(/_/g, ' ').toLowerCase()}</span></div>
-      <div className="small muted">Started {fmtTime(e.startedAt)}{e.endedAt && ` · ended ${fmtTime(e.endedAt)} (actual elapsed ${Math.max(0, Math.round((ms(e.endedAt) - ms(e.startedAt)) / 1000))}s — accelerated demo)`} · authorization: {e.authorization.kind === 'APPROVAL' ? `approval by ${e.authorization.actor} (${e.authorization.role})` : `policy v${e.authorization.policyVersion} preapproval`} · <strong>simulated</strong> — no real device command</div>
-      <div className="table-wrap"><table className="data steps-table" aria-label="Execution steps">
-        <thead><tr><th>Step</th><th>Type · risk</th><th>Approval</th><th>Depends on</th><th>Status</th><th>Expected result / verification</th><th>Recovery</th></tr></thead>
-        <tbody>
-          {defs.map((d, i) => { const k = stateOf(i); return (
-            <tr key={d.id} data-step={d.id} data-step-status={k.cls}>
-              <td><span className={`step-dot ${k.cls === 'pause' ? 'active' : k.cls}`} aria-hidden>{k.cls === 'done' ? '✓' : k.cls === 'fail' ? '!' : i + 1}</span> <strong>{d.id}</strong> {d.description}{e.results[i] && <div className="small muted">{e.results[i]}</div>}</td>
-              <td>{STEP_TYPE[d.type]} · <RiskBadge risk={d.risk} /></td>
-              <td className="small">{APPROVAL_TEXT[d.approval]}{d.approval === 'STEP' && sa && i === e.stepIndex ? ` — approved by ${sa.actor}` : ''}</td>
-              <td className="small">{d.dependsOn.join(', ') || '—'}</td>
-              <td><span className={`badge ${k.cls === 'done' ? 'b-success' : k.cls === 'fail' ? 'b-danger' : k.cls === 'pause' ? 'b-warning' : k.cls === 'active' ? 'b-accent' : 'b-outline'}`}>{k.text}</span></td>
-              <td className="small">{d.expectedResult}<div className="muted">Check: {d.verification}</div></td>
-              <td className="small">{d.recoverable ? 'Recoverable' : 'Not reversible'}</td>
-            </tr>); })}
-          <tr><td><span className={`step-dot ${verifying ? 'active' : e.verificationOutput.length ? (e.verificationPassed ? 'done' : 'fail') : ''}`} aria-hidden>{e.verificationOutput.length ? (e.verificationPassed ? '✓' : '!') : defs.length + 1}</span> <strong>V</strong> Verification checks</td><td>Independent phase</td><td className="small">Auto</td><td className="small">{defs.map((d) => d.id).join(', ')}</td>
-            <td><span className={`badge ${verifying ? 'b-accent' : e.verificationOutput.length ? (e.verificationPassed ? 'b-success' : 'b-danger') : 'b-outline'}`}>{verifying ? 'Running…' : e.verificationOutput.length ? (e.verificationPassed ? 'Passed' : 'Failed') : 'Pending'}</span></td><td className="small">{rb?.checks.join('; ')}</td><td className="small">—</td></tr>
-        </tbody></table></div>
-      {e.preflight.length > 0 && <details className="disclosure"><summary>Preflight results recorded at start ({e.preflight.filter((c) => c.status === 'PASS').length} passed, {e.preflight.filter((c) => c.status === 'NA').length} n/a)</summary><PreflightPanel checks={e.preflight} title="Preflight at execution start" note="Snapshot recorded in the audit log when execution started." /></details>}
-      {e.changes.length > 0 && (
-        <table className="data change-table"><thead><tr><th>Field</th><th>Before (snapshot)</th><th>After action</th><th>Current</th></tr></thead>
-          <tbody>{e.changes.map((c) => <tr key={c.field}><td>{deviceFieldLabel(c.field)}</td><td className="diff-before">{String(c.before)}</td><td className="diff-after">{String(c.after)}</td><td>{String(s.devices[e.deviceId][c.field])}</td></tr>)}</tbody></table>
-      )}
-      {e.verificationOutput.length > 0 && <div className={`banner ${e.verificationPassed ? 'success' : 'danger'}`} style={{ margin: 0 }}>{e.verificationPassed ? <CheckCircle2 size={16} aria-hidden /> : <XCircle size={16} aria-hidden />}<div><strong>Actual verification output:</strong> {e.verificationOutput.join(' · ')}</div></div>}
-      {e.rollbackDeadline && <div className="small muted">Rollback deadline: {fmtTime(e.rollbackDeadline)}</div>}
-      {e.cancelReason && <div className="banner warn" style={{ margin: 0 }}><AlertTriangle size={16} aria-hidden />Stopped before mutation: {e.cancelReason}</div>}
-      {e.rollbackResults.length > 0 && (<div><strong className="small">Rollback{e.rollbackBy ? ` by ${e.rollbackBy}` : ''}</strong><ul className="clean small">{e.rollbackResults.map((r, i) => <li key={i}>{r.startsWith('FAIL') || r.includes('FAILED') ? <XCircle size={14} color="var(--danger)" aria-hidden /> : <Undo2 size={14} aria-hidden />}{r}</li>)}</ul></div>)}
-    </div>
-  );
-}
-
+/** Administrator incident view (V1.2 §8–11): what the employee tried, what AI proposes, and the decision. */
 export function IncidentDetailPage() {
   const { id } = useParams();
   const state = useStore((s) => s.state);
   const now = useStore((s) => s.now);
   const dispatch = useStore((s) => s.dispatch);
-  const nav = useNavigate();
-  const [tab, setTab] = useState<Tab>('remediation');
-  const [modal, setModal] = useState<null | { kind: 'REJECT' | 'REQUEST_REVIEW' | 'ESCALATE' | 'REOPEN' | 'REOPEN_EMP' | 'REJECT_STEP' } | { kind: 'SCHEDULE' } | { kind: 'MANUAL' } | { kind: 'STEP' }>(null);
-  const [sp, setSp] = useSearchParams();
-  const focus = sp.get('focus');
-  const [pendingFocus, setPendingFocus] = useState(false);
-  useEffect(() => {
-    if (focus !== 'action') return;
-    // Consume the deep-link parameter synchronously (no delayed URL writes that could race a later navigation).
-    setTab('remediation');
-    setPendingFocus(true);
-    setSp((p) => { const n = new URLSearchParams(p); n.delete('focus'); return n; }, { replace: true });
-  }, [focus, setSp]);
-  useEffect(() => {
-    if (!pendingFocus) return;
-    const h = setTimeout(() => {
-      const el = document.getElementById('action-card');
-      el?.scrollIntoView?.({ block: 'start' });
-      (el?.querySelector<HTMLElement>('[data-primary]:not([disabled])') ?? el)?.focus?.();
-      setPendingFocus(false);
-    }, 30);
-    return () => clearTimeout(h);
-  }, [pendingFocus]);
+  const [modal, setModal] = useState<null | 'approve' | 'reject' | 'investigate' | 'resolve'>(null);
+  const [ack, setAck] = useState(false);
   const [reason, setReason] = useState('');
-  const [schedAt, setSchedAt] = useState('');
-  const [impactOk, setImpactOk] = useState(false);
-  const [manual, setManual] = useState({ note: '', evidence: '', verified: false });
-  const [ev, setEv] = useState<{ kind: EvidenceKind; note: string }>({ kind: 'DISK_USAGE', note: '' });
-  const [submitting, setSubmitting] = useState(false);
+  const [res, setRes] = useState({ rootCause: '', steps: '', verification: '', save: false, title: '', pattern: '', questions: '', employeeSteps: '', adminSteps: '', conditions: '', expectedOutcome: '', risks: '', rollback: '' });
+  const [busy, setBusy] = useState(false);
   const t = id ? state.tickets[id] : undefined;
-  const g = useMemo(() => (t ? gatesFor(state, t.id, now) : undefined), [state, t, now]);
-  const hyp = useMemo(() => (t ? gatesFor(state, t.id, now, { approvalValid: true, scheduleDueAt: undefined }) : undefined), [state, t, now]);
-  if (!t || !g || !hyp) return <NotFoundPage />;
-  const role = state.settings.role;
-  const ro = role === 'MANAGER';
-  const d = currentDiagnosis(state, t);
+  const sim = useMemo(() => (t ? similarIncidents(state, t.id) : undefined), [state, t]);
+  if (!t || !sim) return <NotFoundPage />;
+  const emp = employeeById(t.employeeId);
   const dev = state.devices[t.deviceId];
-  const rb = d?.runbookId ? state.runbooks.find((r) => r.id === d.runbookId && r.version === d.runbookVersion) : undefined;
-  const executions = state.executions.filter((e) => e.ticketId === t.id);
-  const lastExec = executions[executions.length - 1];
-  const running = activeExecution(state, t.id);
-  const rbInfo = rollbackInfo(state, t, role, now);
+  const d = currentDiagnosis(state, t);
+  const g = gatesFor(state, t.id, now);
+  const rb = g.runbook;
+  const ps = productStatus(t);
+  const ap = approvalStatus(state, t);
+  const ts = t.troubleshooting;
+  const exec = state.executions.filter((e) => e.ticketId === t.id).slice(-1)[0];
+  const rbInfo = rollbackInfo(state, t, now);
   const audit = state.audit.filter((a) => a.ticketId === t.id).slice().reverse();
-  const notes = state.notifications.filter((n) => n.ticketId === t.id).slice().reverse();
-  const approvals = state.approvals.filter((a) => a.ticketId === t.id).slice().reverse();
-  const revisions = state.diagnoses.filter((x) => x.ticketId === t.id).sort((a, b) => b.revision - a.revision);
-  const act = SIM_ACTIONS[rb?.actionKey ?? 'UNKNOWN'];
-  const preview = act ? (Object.entries(act.patch(dev)) as [keyof Device, unknown][]).map(([f, v]) => ({ f, before: dev[f], after: v })) : [];
-  const perm = d ? canRoleApprove(role, d.risk) : { ok: false, reason: 'No diagnosis' };
-  const draftExists = state.runbooks.some((r) => r.sourceTicketIds.includes(t.id));
-  const job = g.job;
-  const attempts = d ? attemptsForRevision(state, t.id, d.revision) : 0;
-
-  const run = (a: Parameters<typeof dispatch>[0]) => { if (submitting) return; setSubmitting(true); try { return dispatch(a); } finally { setTimeout(() => setSubmitting(false), 250); } };
-  const openReason = (kind: 'REJECT' | 'REQUEST_REVIEW' | 'ESCALATE' | 'REOPEN' | 'REOPEN_EMP' | 'REJECT_STEP') => { setReason(''); setModal({ kind }); };
-  const paused = pausedExecution(state, t.id);
-  const pausedStep = paused ? runbookOf(state, paused)?.stepDefs[paused.stepIndex] : undefined;
-  const pf = preflight(state, t.id, now, { execution: paused ?? (running && running.phase !== 'ROLLING_BACK' ? running : undefined), viewerRole: role });
-  const stepPerm = pausedStep ? canRoleApprove(role, pausedStep.risk) : { ok: false };
-  const stepBlocking = pf.blocking.filter((c) => c.key !== 'auth' && c.key !== 'window');
-  const approveNow = () => run({ type: 'APPROVE', ticketId: t.id });
-  const openSchedule = () => { setSchedAt(toLocalInput(now + 10 * MIN)); setImpactOk(false); setModal({ kind: 'SCHEDULE' }); };
-
-  const approveLabel = d?.risk === 'HIGH' ? 'Approve & schedule' : hyp.route === 'AWAITING_CONSENT' ? 'Approve & request consent' : hyp.route === 'READY' ? 'Approve & execute' : 'Approve';
-  const approveDisabled = ro ? 'Manager role is read-only' : !perm.ok ? perm.reason : t.status !== 'AWAITING_APPROVAL' ? null : !rb ? 'No executable runbook' : null;
-
-  const liveText = running ? `${t.displayId}: ${running.phase === 'ROLLING_BACK' ? 'rolling back' : running.phase === 'VERIFYING' ? 'verifying' : `executing step ${running.stepIndex + 1} of 3`}` : `${t.displayId}: ${STATUS_LABEL[t.status]}`;
-
-  const primary = (() => {
-    switch (t.status) {
-      case 'OPEN': case 'REOPENED':
-        return <div className="stack"><button className="btn btn-primary" disabled={ro || submitting} onClick={() => run({ type: 'RUN_DIAGNOSIS', ticketId: t.id })}><Search size={16} aria-hidden />Run diagnosis</button><DisabledReason reason={ro ? 'Manager role is read-only' : null} /></div>;
-      case 'AWAITING_APPROVAL':
-        return (
-          <div className="stack">
-            <div className="row">
-              <button className="btn btn-primary" data-primary data-testid="approve" disabled={!!approveDisabled || submitting} onClick={d?.risk === 'HIGH' ? openSchedule : approveNow}>{d?.risk === 'HIGH' ? <CalendarClock size={16} aria-hidden /> : <CheckCircle2 size={16} aria-hidden />}{approveLabel}</button>
-              {d?.risk !== 'HIGH' && <button className="btn" disabled={!!approveDisabled || submitting} onClick={openSchedule}><CalendarClock size={16} aria-hidden />Approve &amp; schedule</button>}
-            </div>
-            <DisabledReason reason={approveDisabled} />
-            <p className="small muted">Requires {g.requiredRole === 'ADMIN' ? 'Admin' : 'Agent or Admin'} · approval binds plan {d?.planHash.slice(0, 8)} and policy v{state.policy.version}; expires after {state.policy.approvalTTLMin} min if not started.</p>
-          </div>
-        );
-      case 'AWAITING_CONSENT':
-        return <div className="stack"><div className="banner warn" style={{ margin: 0 }}><UserCheck size={16} aria-hidden /><div>Waiting for employee consent{t.employeeResponse ? ` (last response: ${t.employeeResponse.choice.toLowerCase()})` : ''}. Consent is never inferred from agent approval.</div></div><EmployeeConsentCard ticketId={t.id} /></div>;
-      case 'STEP_APPROVAL':
-        return (
-          <div className="stack">
-            <div className="banner warn" style={{ margin: 0 }}><Hourglass size={16} aria-hidden /><div>Paused before <strong>{pausedStep?.id} · {pausedStep?.description}</strong> ({pausedStep?.risk} risk). Read-only steps ran automatically; no device change has been made yet. This approval is scoped to {t.displayId}, {dev.name}, action {rb?.actionKey}, {rb?.id} v{rb?.version}.</div></div>
-            <div className="row">
-              <button className="btn btn-primary" data-primary data-testid="approve-step" disabled={ro || !stepPerm.ok || stepBlocking.length > 0 || submitting} onClick={() => { setSchedAt(''); setImpactOk(false); setModal({ kind: 'STEP' }); }}><CheckCircle2 size={16} aria-hidden />Approve step…</button>
-              <button className="btn btn-danger" disabled={ro} onClick={() => openReason('REJECT_STEP')}>Reject step</button>
-            </div>
-            <DisabledReason reason={ro ? 'Manager role is read-only' : !stepPerm.ok ? `Step ${pausedStep?.id} is ${pausedStep?.risk} risk — requires an Admin step approver` : stepBlocking.length ? `Preflight blocks this step: ${stepBlocking.map((c) => c.label).join(', ')}` : null} />
-          </div>
-        );
-      case 'WAITING_DEVICE':
-        return <div className="banner" style={{ margin: 0 }}><WifiOff size={16} aria-hidden /><div>{g.reasons[g.reasons.length - 1]}. Use the simulation controls to reconnect or mark the employee available — all gates are re-evaluated.</div></div>;
-      case 'SCHEDULED':
-        return <div className="stack"><div className="banner" style={{ margin: 0 }}><CalendarClock size={16} aria-hidden /><div>Scheduled for <strong>{fmtTime(job?.dueAt)}</strong>. Gates (approval, consent, device, pause) are re-checked when due.</div></div>
-          <button className="btn btn-primary" data-testid="advance" disabled={ro || submitting} onClick={() => run({ type: 'ADVANCE_SCHEDULE', ticketId: t.id })}><Clock size={16} aria-hidden />Advance scheduled job to now (demo)</button>
-          <DisabledReason reason={ro ? 'Manager role is read-only' : null} /></div>;
-      case 'READY':
-        return <div className="stack"><div className="banner success" style={{ margin: 0 }}><Play size={16} aria-hidden />All gates satisfied — starting automatically…</div><button className="btn" disabled={ro || submitting} onClick={() => run({ type: 'START', ticketId: t.id })}><Play size={16} aria-hidden />Start now</button></div>;
-      case 'EXECUTING': case 'VERIFYING': case 'ROLLING_BACK':
-        if (paused && paused.stepScheduledFor && Date.parse(paused.stepScheduledFor) > now) return <div className="stack"><div className="banner" style={{ margin: 0 }}><CalendarClock size={16} aria-hidden /><div>Step {runbookOf(state, paused)?.stepDefs[paused.stepIndex]?.id} approved and scheduled for <strong>{fmtTime(paused.stepScheduledFor)}</strong>. Preflight is re-validated before it runs.</div></div><button className="btn btn-primary" data-primary data-testid="advance-step" disabled={ro || submitting} onClick={() => run({ type: 'ADVANCE_STEP', ticketId: t.id })}><Clock size={16} aria-hidden />Advance scheduled step to now (demo)</button></div>;
-        return <div className="banner" style={{ margin: 0 }}><Hourglass size={16} aria-hidden /><div>{t.status === 'ROLLING_BACK' ? 'Rollback in progress' : 'Remediation in progress'} — no unsafe cancellation mid-action. Policy pause stops before the next mutation only.</div></div>;
-      case 'ROLLBACK_AVAILABLE':
-        return <div className="stack"><div className="banner danger" style={{ margin: 0 }}><XCircle size={16} aria-hidden /><div>Verification failed — the ticket is <strong>not</strong> resolved. Roll back the applied change, then follow up manually.</div></div>
-          <button className="btn btn-danger-solid" data-testid="rollback" disabled={!rbInfo.available || submitting} onClick={() => run({ type: 'ROLLBACK', ticketId: t.id })}><Undo2 size={16} aria-hidden />Roll back now</button><DisabledReason reason={rbInfo.available ? null : rbInfo.reason} /></div>;
-      case 'REVIEW_REQUIRED': case 'ESCALATED':
-        return <div className="stack"><div className={`banner ${t.status === 'ESCALATED' ? 'danger' : 'warn'}`} style={{ margin: 0 }}>{t.status === 'ESCALATED' ? <OctagonAlert size={16} aria-hidden /> : <CircleHelp size={16} aria-hidden />}<div>{t.status === 'ESCALATED' ? 'Escalated — no automated execution. Investigate and resolve manually.' : 'Human review required — add validated evidence to re-diagnose, or resolve manually.'}<div className="small">{g.reasons.join(' · ')}</div></div></div>
-          <button className="btn btn-primary" data-testid="resolve-manual" disabled={ro || submitting} onClick={() => { setManual({ note: '', evidence: '', verified: false }); setModal({ kind: 'MANUAL' }); }}><ClipboardCheck size={16} aria-hidden />Resolve manually…</button><DisabledReason reason={ro ? 'Manager role is read-only' : null} /></div>;
-      case 'RESOLVED': case 'CLOSED':
-        return <div className="stack"><div className="banner success" style={{ margin: 0 }}><CheckCircle2 size={16} aria-hidden /><div>{t.status === 'CLOSED' ? 'Closed' : 'Resolved'} via {t.path === 'MANUAL' ? 'manual resolution' : t.path === 'AUTO_POLICY' ? 'policy-preapproved remediation' : 'human-approved remediation'}{t.verified ? ' · verified' : ''}.{t.status === 'RESOLVED' && state.policy.closureMode === 'EMPLOYEE_CONFIRM' ? ' Awaiting employee confirmation.' : ''}</div></div>
-          {t.path === 'MANUAL' && <button className="btn" disabled={ro || draftExists || submitting} onClick={() => { const r = run({ type: 'PROPOSE_DRAFT', fromTicketId: t.id }); if (r?.ok && r.ticketId) nav(`/library/${r.ticketId}`); }}><FilePlus2 size={16} aria-hidden />Propose runbook draft</button>}
-          {t.path === 'MANUAL' && <DisabledReason reason={draftExists ? 'A draft already exists for this ticket' : null} />}</div>;
-      default: return null;
-    }
-  })();
+  const kn = d?.knowledgeId ? state.knowledge.find((k) => k.id === d.knowledgeId) : undefined;
+  const pf = preflight(state, t.id, now, { execution: exec && ['RUNNING', 'VERIFYING'].includes(exec.phase) ? exec : undefined });
+  const recommends = !!(rb && d?.recommendable);
+  const run = (a: Parameters<typeof dispatch>[0]) => { if (busy) return; setBusy(true); const r = dispatch(a); setTimeout(() => setBusy(false), 200); return r; };
+  const canResolve = ['REVIEW_REQUIRED', 'ESCALATED', 'REOPENED'].includes(t.status);
+  const canInvestigate = ['REVIEW_REQUIRED', 'REOPENED', 'ROLLBACK_AVAILABLE', 'AWAITING_CONSENT'].includes(t.status) || (t.status === 'ESCALATED' && !t.investigation);
+  const openResolve = () => {
+    const tried = ts.entries.filter((e) => e.kind === 'STEP' && e.answer === 'COMPLETED').map((e) => e.text);
+    setRes({ rootCause: '', steps: '', verification: '', save: !rb, title: t.title, pattern: `${t.title}. ${t.description}`, questions: ts.entries.filter((e) => e.kind === 'QUESTION').map((e) => e.text).slice(0, 2).join('\n'),
+      employeeSteps: tried.slice(0, 2).join('\n'), adminSteps: '', conditions: `${dev.os} laptops reporting: ${ISSUE_LABEL[t.issueType]}`, expectedOutcome: 'The issue no longer occurs', risks: 'Minimal', rollback: '' });
+    setModal('resolve');
+  };
 
   return (
     <div>
-      <div className="sr-only" aria-live="polite" role="status">{liveText}</div>
-      <section className="detail-head" aria-label="Ticket header">
+      <section className="detail-head" aria-label="Incident summary">
         <div className="row-between">
-          <div className="row"><h1>{t.displayId}</h1><StatusBadge status={t.status} />{t.demo && <span className="badge b-accent">Demo scenario{t.scenario && t.scenario !== 'CUSTOM' ? ` ${t.scenario}` : ''}</span>}</div>
-          <div className="row"><SlaBadge t={t} now={now} /><PathBadge path={t.path} /><RiskBadge risk={d?.risk} /></div>
+          <div className="row"><h1>{t.displayId}</h1><StatusBadge t={t} /><ApprovalBadge status={ap} />{t.status === 'CLOSED' && <MethodBadge path={t.path} />}</div>
+          <SlaBadge t={t} now={now} />
         </div>
-        <p style={{ marginTop: 6, fontSize: 15 }}>{t.title}</p>
+        <p style={{ marginTop: 6, fontSize: 15 }}><strong>{t.title}</strong> — {t.description}</p>
         <dl className="meta-grid">
-          <div><dt>Requester</dt><dd>{t.requester}</dd></div>
-          <div><dt>Device</dt><dd>{dev.name}</dd></div>
-          <div><dt>Owner</dt><dd>{t.owner}</dd></div>
-          <div><dt>Source · priority</dt><dd>{t.source === 'DETECTION' ? 'Proactive detection' : 'Employee report'} · {t.priority}</dd></div>
-          <div><dt>Created</dt><dd>{fmtShort(t.createdAt)}</dd></div>
-          <div><dt>Updated</dt><dd>{fmtShort(t.updatedAt)}</dd></div>
-          <div><dt>Resolved</dt><dd>{fmtShort(t.resolvedAt)}</dd></div>
-          <div><dt>Closed</dt><dd>{fmtShort(t.closedAt)}</dd></div>
-          <div><dt>Eligible at intake</dt><dd title={t.eligibilityReason}>{t.eligibleAtIntake ? 'Yes' : 'No'} <span className="small muted">(policy v{t.intakePolicyVersion})</span></dd></div>
-          <div><dt>Reopened</dt><dd>{t.reopenedCount}×</dd></div>
+          <div><dt>Employee</dt><dd>{emp.name} <span className="small muted">· {emp.department}</span></dd></div>
+          <div><dt>Device</dt><dd>{dev.name} <span className="small muted">· {dev.os}</span></dd></div>
+          <div><dt>Issue</dt><dd>{ISSUE_LABEL[t.issueType]}</dd></div>
+          <div><dt>Created</dt><dd>{fmtShort(t.createdAt)} <span className="small muted">· {fmtAge(now - Date.parse(t.createdAt))} ago</span></dd></div>
+          <div><dt>Priority</dt><dd>{t.priority}</dd></div>
+          {t.status === 'CLOSED' && <div><dt>Est. admin time saved</dt><dd>{fmtMin(savedForTicket(state, t))}</dd></div>}
         </dl>
-        <p className="small muted" style={{ marginTop: 8 }}>Times shown in {TZ}.</p>
       </section>
 
-      <div className="tabs" role="tablist" aria-label="Ticket sections">
-        {(['summary', 'remediation', 'activity'] as Tab[]).map((k) => <button key={k} role="tab" aria-selected={tab === k} aria-controls={`panel-${k}`} id={`tab-${k}`} onClick={() => setTab(k)}>{k === 'summary' ? 'Summary' : k === 'remediation' ? 'Remediation' : `Activity (${audit.length})`}</button>)}
-      </div>
-
-      {tab === 'summary' && (
-        <div role="tabpanel" id="panel-summary" aria-labelledby="tab-summary" className="grid grid-2">
-          <div className="card stack">
-            <h2>Description</h2><p>{t.description}</p>
-            <h3>Eligibility at intake</h3><p className="small">{t.eligibleAtIntake ? 'Eligible' : 'Not eligible'} — {t.eligibilityReason} (immutable; policy v{t.intakePolicyVersion})</p>
-            {t.resolutionNote && <><h3>Resolution note</h3><p>{t.resolutionNote}</p><p className="small muted">Evidence: {t.manualEvidence}</p></>}
-            <h3>Diagnosis revisions</h3>
-            <ul className="clean small">{revisions.map((r) => <li key={r.id}><Info size={14} aria-hidden />Rev {r.revision} · {fmtShort(r.createdAt)} · {CATEGORY_LABEL[r.category]} · score {r.confidence} · {r.risk} · policy v{r.policyVersion} · plan <span className="mono">{r.planHash.slice(0, 8)}</span> → {STATUS_LABEL[r.recommendedRoute]}</li>)}</ul>
-            <h3>Decisions</h3>
-            {approvals.length === 0 ? <p className="small muted">No approval decisions yet.</p> : <ul className="clean small">{approvals.map((a) => <li key={a.id}><UserCheck size={14} aria-hidden />{a.decision} by {a.actor} ({a.role}) · {fmtShort(a.at)} · rev {a.diagnosisRevision}{a.reason ? ` · “${a.reason}”` : ''}{a.consumedBy ? ' · used' : ''}{a.invalidatedAt ? ` · invalidated: ${a.invalidReason}` : ''}{a.expiredLoggedAt ? ' · expired' : ''}</li>)}</ul>}
-            {t.consent && <p className="small">Consent: {t.consent.granted ? 'granted' : 'denied'} {fmtShort(t.consent.at)}{t.consent.granted ? ` · expires ${fmtShort(t.consent.expiresAt)}` : ''}</p>}
-          </div>
-          <div className="card"><h2>Device context · {dev.name}</h2><TelemetryPreview d={dev} /><p className="small muted" style={{ marginTop: 8 }}>“Online” means the management channel is reachable — not necessarily that Wi-Fi is healthy.</p></div>
-        </div>
-      )}
-
-      {tab === 'remediation' && (
-        <div role="tabpanel" id="panel-remediation" aria-labelledby="tab-remediation" className="split">
-          <div style={{ gridColumn: '1 / -1' }}><CorrelationPanel ticketId={t.id} /></div>
-          <section className="card stack" aria-label="Evidence">
-            <h2>AI assessment {d && <span className="badge b-outline">Revision {d.revision}</span>}</h2>
-            {!d ? <p className="muted">{t.isParent ? 'Shared incident — no endpoint diagnosis. Investigate the network segment and resolve manually.' : 'Not diagnosed yet.'}</p> : (
-              <>
-                <div className="row"><span className="badge b-neutral">{CATEGORY_LABEL[d.category]}</span>{!d.telemetryConsistent && <span className="badge b-warning"><AlertTriangle size={12} aria-hidden />Telemetry mismatch — validation requested</span>}</div>
-                <ScoreMeter score={d.confidence} review={state.policy.reviewThreshold} approval={state.policy.approvalThreshold} auto={state.policy.autoThreshold} />
-                <AssessmentPanel ticketId={t.id} />
-                <h3>Policy route</h3>
-                <ul className="clean">{g.reasons.map((x, i) => <li key={i}><ShieldAlert size={14} aria-hidden />{x}</li>)}</ul>
-              </>
-            )}
-            {t.status === 'REVIEW_REQUIRED' && (
-              <div className="sim-box stack">
-                <h3>Additional diagnostics</h3>
-                <p className="small muted">Scenario-supported evidence is checked against current telemetry before it can change the plan. Free text stays uncertain. Scores cannot be edited.</p>
-                <div className="grid grid-2">
-                  <label className="field">Evidence type<select value={ev.kind} onChange={(e) => setEv({ ...ev, kind: e.target.value as EvidenceKind })}>{EVIDENCE_KINDS.map((k) => <option key={k.kind} value={k.kind}>{k.label}</option>)}</select></label>
-                  <label className="field">Observation<input type="text" value={ev.note} onChange={(e) => setEv({ ...ev, note: e.target.value })} placeholder="e.g. disk 96% used" /></label>
-                </div>
-                <div><button className="btn" disabled={ro || ev.note.trim().length < 3 || submitting} onClick={() => { const r = run({ type: 'ADD_EVIDENCE', ticketId: t.id, kind: ev.kind, note: ev.note }); if (r?.ok) setEv({ ...ev, note: '' }); }}><Search size={14} aria-hidden />Add evidence &amp; re-diagnose</button></div>
-              </div>
-            )}
+      <div className="split">
+        <div className="stack-16">
+          <section className="card stack" aria-label="Employee troubleshooting">
+            <h2><MessageSquare size={16} aria-hidden />Employee troubleshooting</h2>
+            {ts.entries.length === 0 ? <p className="muted">No guided troubleshooting yet.</p> : <>
+              <p className="small">{ts.state === 'RESOLVED' ? 'Resolved by the employee with guided troubleshooting.' : ts.state === 'ESCALATED' ? <>Escalated to IT: <strong>{ts.escalationReason}</strong>. No need to repeat these steps.</> : 'Troubleshooting in progress.'}</p>
+              <ol className="history">{ts.entries.map((e, i) => <li key={i}><span className="small muted">{e.kind === 'QUESTION' ? 'Q' : e.kind === 'STEP' ? 'Step' : 'Check'}</span><span>{e.text}</span><span className={`badge ${e.answer === 'RESOLVED' || e.answer === 'COMPLETED' ? 'b-success' : e.answer === 'PERSISTS' || e.answer === 'UNABLE' ? 'b-danger' : 'b-neutral'}`}>{e.answerLabel}</span></li>)}</ol>
+            </>}
           </section>
 
-          <section className="card action-card stack" aria-label="Recommended action" id="action-card" tabIndex={-1}>
-            <h2>Recommended plan</h2>
-            {rb ? (
-              <dl className="kv">
-                <dt>Runbook</dt><dd><Link to={`/library/${rb.id}`}>{rb.id} v{rb.version}</Link> — {rb.title}{rb.status !== 'APPROVED' && <span className="badge b-danger" style={{ marginLeft: 6 }}>{rb.status}</span>}</dd>
-                <dt>Risk / impact</dt><dd><RiskBadge risk={d?.risk} /> {rb.disruptive ? 'Disruptive — employee consent required' : 'Non-disruptive'}</dd>
-                <dt>Expected duration</dt><dd>~{rb.expectedMin} min (simulated); demo runs in seconds</dd>
-                <dt>Prerequisites</dt><dd>{rb.prerequisites.join(' · ')}</dd>
-                <dt>Change preview</dt><dd>{preview.length ? preview.map((p) => <div key={p.f}>{deviceFieldLabel(p.f)}: <span className="diff-before">{String(p.before)}</span> → <span className="diff-after">{String(p.after)}</span></div>) : '—'}</dd>
-                <dt>Verification</dt><dd>{rb.checks.join(' · ')}</dd>
-                <dt>Rollback</dt><dd>{rb.reversible ? `Available for 30 min after action: ${rb.rollbackSteps.join('; ')}` : `Not available — ${rb.recoveryNote}`}</dd>
-                <dt>Required approver</dt><dd>{g.requiredRole === 'ADMIN' ? 'Admin (HIGH risk)' : g.autoEligible ? 'None — preapproved by policy' : 'Agent or Admin'}</dd>
-                <dt>Attempts</dt><dd>{attempts} of {state.policy.maxAttempts} for revision {d?.revision}</dd>
-              </dl>
-            ) : <p className="muted">No approved executable runbook for {CATEGORY_LABEL[d?.category ?? t.category]}. No device action will be executed.</p>}
-            {rb && !['RESOLVED', 'CLOSED', 'ESCALATED', 'ROLLBACK_AVAILABLE', 'ROLLING_BACK', 'VERIFYING'].includes(t.status) && <PreflightPanel checks={pf.checks} title={paused ? 'Preflight before the next step' : 'Preflight safety checks'} />}
-            <div className="stack" style={{ borderTop: '1px solid var(--border)', paddingTop: 12 }}>{primary}</div>
-            <div className="row">
-              {t.status === 'AWAITING_APPROVAL' && <><button className="btn" disabled={ro} onClick={() => openReason('REQUEST_REVIEW')}>Request review</button><button className="btn btn-danger" disabled={ro} onClick={() => openReason('REJECT')}>Reject</button></>}
-              {ESCALATABLE.includes(t.status) && <button className="btn btn-danger" disabled={ro} onClick={() => openReason('ESCALATE')}><OctagonAlert size={14} aria-hidden />Escalate</button>}
-              {(t.status === 'RESOLVED' || t.status === 'CLOSED') && <button className="btn" disabled={ro} onClick={() => openReason('REOPEN')}><RotateCcw size={14} aria-hidden />Reopen</button>}
-              {(t.status === 'RESOLVED' || t.status === 'CLOSED') && rbInfo.exec?.reversible && <button className="btn btn-danger" disabled={!rbInfo.available || submitting} onClick={() => run({ type: 'ROLLBACK', ticketId: t.id })}><Undo2 size={14} aria-hidden />Roll back</button>}
-            </div>
-            {(t.status === 'RESOLVED' || t.status === 'CLOSED') && rbInfo.exec && <DisabledReason reason={rbInfo.available ? null : `Rollback unavailable: ${rbInfo.reason}`} />}
-
-            <div className="sim-box stack" aria-label="Simulation controls">
-              <h3><AlertTriangle size={12} aria-hidden />Simulation controls (demo)</h3>
+          {!d && (t.status === 'REOPENED' || t.status === 'OPEN') && (
+            <section className="card action-card stack" aria-label="Next action" id="action-card">
+              <h2><Bot size={16} aria-hidden />AI assessment</h2>
+              <p className="small">{t.status === 'REOPENED' ? 'The employee reopened this ticket — the problem came back after self-service. AI has not assessed it yet.' : 'AI has not assessed this incident yet.'}</p>
               <div className="row">
-                <button className="btn btn-sm" disabled={ro} onClick={() => dispatch({ type: 'SET_DEVICE', ticketId: t.id, online: !dev.online })}>{dev.online ? <><WifiOff size={14} aria-hidden />Take device offline</> : <><Wifi size={14} aria-hidden />Simulate device reconnect</>}</button>
-                <button className="btn btn-sm" disabled={ro} onClick={() => dispatch({ type: 'SET_DEVICE', ticketId: t.id, busy: !dev.busy })}>{dev.busy ? 'Mark employee available' : 'Mark employee busy'}</button>
-                <button className="btn btn-sm" data-testid="battery-toggle" disabled={ro} onClick={() => dispatch({ type: 'SET_DEVICE', ticketId: t.id, batteryPct: dev.batteryPct < 30 ? 85 : 12 })}>{dev.batteryPct < 30 ? <><Battery size={14} aria-hidden />Plug in charger (85%)</> : <><BatteryLow size={14} aria-hidden />Drain battery (12%)</>}</button>
+                <button className="btn btn-primary" data-testid="rediagnose" disabled={busy} onClick={() => run({ type: 'RUN_DIAGNOSIS', ticketId: t.id })}><RefreshCw size={14} aria-hidden />Run AI diagnosis</button>
+                {canInvestigate && <button className="btn" data-testid="investigate" onClick={() => { setReason(''); setModal('investigate'); }}><Search size={14} aria-hidden />Investigate Manually</button>}
+                {canResolve && <button className="btn" data-testid="resolve-manual" onClick={openResolve}><Wrench size={14} aria-hidden />Resolve manually…</button>}
               </div>
-              {t.status === 'RESOLVED' && state.policy.closureMode === 'EMPLOYEE_CONFIRM' && <div className="row"><button className="btn btn-sm" disabled={ro} onClick={() => run({ type: 'EMPLOYEE_CONFIRM', ticketId: t.id })}>Simulate employee: confirm fixed</button><button className="btn btn-sm" disabled={ro} onClick={() => openReason('REOPEN_EMP')}>Simulate employee: still broken</button></div>}
-              {t.status === 'CLOSED' && <div className="row"><button className="btn btn-sm" disabled={ro} onClick={() => openReason('REOPEN_EMP')}>Simulate employee: issue recurred</button></div>}
-              <p className="small muted">Battery {dev.batteryPct}% · network {dev.networkId} · {dev.location}. Toggles change only this fictional device and re-evaluate gates; they never bypass approval, consent or pause.</p>
-            </div>
-          </section>
-
-          {executions.length > 0 && (
-            <section className="card stack" style={{ gridColumn: '1 / -1' }} aria-label="Execution history">
-              <h2>Execution progress &amp; history</h2>
-              {[...executions].reverse().map((e) => <div key={e.id} style={{ borderTop: e === lastExec ? undefined : '1px solid var(--border)', paddingTop: 8 }}><ExecutionView e={e} s={state} now={now} /></div>)}
             </section>
           )}
-          {!t.isParent && <div style={{ gridColumn: '1 / -1' }}><SimilarIncidentsPanel ticketId={t.id} /></div>}
-        </div>
-      )}
+          {d && (
+            <section className="card action-card stack" aria-label="AI recommendation" id="action-card">
+              <div className="row-between"><h2><Bot size={16} aria-hidden />{recommends ? 'AI recommendation' : 'AI assessment'}</h2>
+                <span className="row small">Confidence <ConfidenceBadge value={d.confidence} threshold={state.settings.confidenceThreshold} /><span className="muted">threshold {state.settings.confidenceThreshold}% · simulated</span></span></div>
+              <dl className="kv">
+                <dt>{recommends ? 'Root cause' : 'Suspected cause'}</dt><dd>{d.rootCause}</dd>
+                {recommends && rb && <>
+                  <dt>Proposed fix</dt><dd><strong>{rb.title}</strong>{kn && <span className="badge b-outline" style={{ marginLeft: 6 }}>From validated resolution {kn.id}</span>}<ol className="small" style={{ margin: '4px 0 0', paddingLeft: 18 }}>{rb.steps.map((s) => <li key={s.id}>{s.description}</li>)}</ol></dd>
+                  <dt>Why AI recommends it</dt><dd><ul className="small" style={{ margin: 0, paddingLeft: 18 }}>{d.evidence.slice(0, 3).map((x) => <li key={x}>{x}</li>)}{sim.resolvedCount > 0 && <li>{sim.fixed} of {sim.resolvedCount} similar past incidents were fixed through AI-assisted paths</li>}</ul></dd>
+                  <dt>Expected duration</dt><dd>~{rb.expectedMin} min</dd>
+                  <dt>Employee impact</dt><dd>{rb.employeeImpact}{g.needsConsent ? ' · the employee is asked to agree first' : ''}</dd>
+                  <dt>Expected outcome</dt><dd>{rb.expectedOutcome} — verified by: {rb.checks.join('; ')}</dd>
+                  <dt>Risk</dt><dd><RiskBadge risk={d.risk} /></dd>
+                  <dt>Rollback</dt><dd>{rb.reversible ? <>Available for 30 min: {rb.rollbackSteps.join('; ')}</> : <span className="warn-text"><AlertTriangle size={13} aria-hidden /> Not reversible — {rb.recoveryNote}</span>}</dd>
+                </>}
+              </dl>
+              {!recommends && ps !== 'CLOSED' && <div className="banner warn" style={{ margin: 0 }}><CircleHelp size={16} aria-hidden /><div>{g.reasons[0]}.<ul className="small" style={{ margin: '4px 0 0', paddingLeft: 18 }}>{d.uncertainty.filter((u) => !u.startsWith('Confidence is simulated')).map((u) => <li key={u}>{u}</li>)}</ul></div></div>}
 
-      {tab === 'activity' && (
-        <div role="tabpanel" id="panel-activity" aria-labelledby="tab-activity" className="grid grid-2">
-          <section className="card"><h2>Audit timeline</h2>
-            <ol className="timeline">{audit.map((a) => <li key={a.id}><span className={`tdot ${a.result}`} aria-hidden /><div><div className="row"><strong>{a.action.replace(/_/g, ' ').toLowerCase()}</strong>{a.from && a.to && <span className="small muted">{STATUS_LABEL[a.from]} → {STATUS_LABEL[a.to]}</span>}<ResultIcon result={a.result} /></div><div className="small">{a.reason}</div><div className="small muted">{fmtTime(a.at)} · {a.actor} ({a.role}) · <Link to={`/audit?q=${t.displayId}&event=${a.id}`}>#{a.seq}</Link></div></div></li>)}</ol>
+              {t.status === 'AWAITING_APPROVAL' && (
+                <div className="stack decision">
+                  <div className="row">
+                    <button className="btn btn-primary" data-testid="approve" disabled={busy} onClick={() => { setAck(false); setModal('approve'); }}><CheckCircle2 size={16} aria-hidden />Approve &amp; Execute</button>
+                    <button className="btn btn-danger" data-testid="reject" onClick={() => { setReason(''); setModal('reject'); }}><XCircle size={16} aria-hidden />Reject Recommendation</button>
+                    <button className="btn" data-testid="investigate" onClick={() => { setReason(''); setModal('investigate'); }}><Search size={16} aria-hidden />Investigate Manually</button>
+                  </div>
+                  <p className="small muted" style={{ margin: 0 }}>Every AI-executed fix needs your explicit approval — high confidence never bypasses it. Approval applies only to this incident, {dev.name} and this exact fix; if the proposal changes, the approval is invalidated.</p>
+                </div>
+              )}
+              {ps === 'REMEDIATION' && <div className="banner" style={{ margin: 0 }}><Loader2 size={16} className="spin-slow" aria-hidden /><div>{t.status === 'AWAITING_CONSENT' ? 'Approved — waiting for the employee to agree (disruptive fix).' : t.status === 'WAITING_DEVICE' ? g.reasons[0] : 'Approved — AI is executing and will verify the result before closing.'}</div></div>}
+              {rbInfo.available && <div className="row"><button className="btn btn-danger-solid" data-testid="rollback" disabled={busy} onClick={() => run({ type: 'ROLLBACK', ticketId: t.id })}><Undo2 size={16} aria-hidden />Roll back</button><span className="small muted">Restores only what this fix changed. A rollback is not a resolution.</span></div>}
+              {t.status === 'ROLLBACK_AVAILABLE' && !rbInfo.available && <DisabledReason reason={rbInfo.reason} />}
+              <div className="row">
+                {(t.status === 'REOPENED' || (ps === 'UNSUPPORTED' && t.status !== 'AWAITING_APPROVAL')) && <button className="btn" data-testid="rediagnose" disabled={busy} onClick={() => run({ type: 'RUN_DIAGNOSIS', ticketId: t.id })}><RefreshCw size={14} aria-hidden />Run AI diagnosis again</button>}
+                {canInvestigate && <button className="btn" data-testid="investigate" onClick={() => { setReason(''); setModal('investigate'); }}><Search size={14} aria-hidden />Investigate Manually</button>}
+                {canResolve && <button className="btn btn-primary" data-testid="resolve-manual" onClick={openResolve}><Wrench size={14} aria-hidden />Resolve manually…</button>}
+              </div>
+              {t.investigation && t.status !== 'CLOSED' && <p className="small"><Wrench size={13} aria-hidden /> Manual investigation: {t.investigation.reason} <span className="muted">({t.investigation.by}, {fmtShort(t.investigation.at)})</span></p>}
+            </section>
+          )}
+
+          {exec && (
+            <section className="card stack" aria-label="Execution">
+              <div className="row-between"><h2><ShieldCheck size={16} aria-hidden />Execution &amp; verification</h2><span className="small muted">simulated · approved by {exec.approvedBy}</span></div>
+              <ol className="history">{runbookOf(state, exec)?.steps.map((s, i) => { const r = exec.results[i]; const stopped = !!r && (r.includes('FAILED') || r.includes('stopped')); const active = !r && exec.phase === 'RUNNING' && exec.stepIndex === i; return <li key={s.id}><span className="small muted">{s.id}</span><span>{s.description}</span><span className={`badge ${r ? (stopped ? 'b-danger' : 'b-success') : active ? 'b-accent' : 'b-outline'}`}>{r ? (stopped ? 'Stopped' : 'Done') : active ? 'Running…' : 'Pending'}</span></li>; })}
+                <li><span className="small muted">V</span><span>Verify the expected outcome</span><span className={`badge ${exec.phase === 'VERIFYING' ? 'b-accent' : exec.verificationOutput.length ? (exec.verificationPassed ? 'b-success' : 'b-danger') : 'b-outline'}`} data-testid="verify-state">{exec.phase === 'VERIFYING' ? 'Checking…' : exec.verificationOutput.length ? (exec.verificationPassed ? 'Passed' : 'Failed') : 'Pending'}</span></li></ol>
+              {exec.verificationOutput[0] && <div className={`banner ${exec.verificationPassed ? 'success' : 'danger'}`} style={{ margin: 0 }}>{exec.verificationPassed ? <CheckCircle2 size={16} aria-hidden /> : <XCircle size={16} aria-hidden />}<div><strong>{exec.verificationPassed ? 'Verified' : 'Verification failed — the incident stays open'}:</strong> {exec.verificationOutput[0].slice(7)}</div></div>}
+              {exec.rollbackResults.length > 0 && <div className="small"><strong>Rollback{exec.rollbackBy ? ` by ${exec.rollbackBy}` : ''}:</strong> {exec.rollbackResults.join(' · ')}</div>}
+              <details className="disclosure"><summary>Prerequisites and change log</summary>
+                <ul className="clean small" style={{ marginTop: 8 }}>{(exec.preflight.length ? exec.preflight : pf.checks).filter((c) => c.status !== 'NA').map((c) => <li key={c.key}>{c.status === 'PASS' ? <CheckCircle2 size={14} color="var(--success)" aria-hidden /> : <AlertTriangle size={14} color="var(--warning)" aria-hidden />}{c.label}: {c.detail}</li>)}</ul>
+                {exec.changes.length > 0 && <table className="data change-table" style={{ marginTop: 8 }}><thead><tr><th>Setting</th><th>Before</th><th>After fix</th><th>Now</th></tr></thead><tbody>{exec.changes.map((c) => <tr key={c.field}><td>{deviceFieldLabel(c.field)}</td><td>{String(c.before)}</td><td>{String(c.after)}</td><td>{String(dev[c.field])}</td></tr>)}</tbody></table>}
+              </details>
+            </section>
+          )}
+
+          {t.resolution && t.status === 'CLOSED' && (
+            <section className="card stack" aria-label="Resolution"><h2><CheckCircle2 size={16} aria-hidden />Resolution</h2>
+              <dl className="kv"><dt>Root cause</dt><dd>{t.resolution.rootCause}</dd><dt>What fixed it</dt><dd>{t.resolution.steps}</dd><dt>Verification</dt><dd>{t.resolution.verification}</dd><dt>By</dt><dd>{t.resolution.by} · {fmtShort(t.resolution.at)}</dd></dl>
+              {state.knowledge.filter((k) => k.sourceTicketId === t.id).map((k) => <p key={k.id} className="small" data-testid="knowledge-status">Reusable resolution <strong>{k.id}</strong> — {k.status === 'VALIDATED' ? 'validated, used by AI for similar incidents' : k.status === 'PENDING_VALIDATION' ? <>waiting for validation · <Link to="/opportunities">Review in Opportunities</Link></> : 'rejected'}</p>)}
+            </section>
+          )}
+        </div>
+
+        <div className="stack-16">
+          <section className="card stack" aria-label="Historical incidents"><h2><History size={16} aria-hidden />Similar past incidents</h2>
+            {sim.items.length === 0 ? <p className="small muted">No similar incidents on record.</p> : <ul className="clean small">{sim.items.map((x) => <li key={x.ticket.id}><ChevronRight size={14} aria-hidden /><span><Link to={`/incidents/${x.ticket.id}`}>{x.ticket.displayId}</Link> {x.ticket.title} — <span className={x.outcome.startsWith('FAILED') ? 'warn-text' : ''}>{HIST_LABEL[x.outcome]}</span>{x.failReason ? ` (${x.failReason})` : ''}</span></li>)}</ul>}
+            {sim.failures.length > 0 && <p className="small warn-text"><AlertTriangle size={13} aria-hidden /> {sim.failures.length} similar AI fix{sim.failures.length > 1 ? 'es' : ''} failed before — check the reason above.</p>}
           </section>
-          <section className="card"><h2>Employee &amp; agent notifications (simulated)</h2>
-            {notes.length === 0 ? <p className="muted">None.</p> : <ul className="clean">{notes.map((n) => <li key={n.id}><Info size={14} aria-hidden /><div><div className="small muted">To {n.recipient.toLowerCase()} · {fmtTime(n.at)}</div>{n.message}</div></li>)}</ul>}
+          <section className="card stack" aria-label="Activity"><h2>Activity</h2>
+            <ol className="timeline">{audit.slice(0, 8).map((a) => <li key={a.id}><span className={`tdot ${a.result}`} aria-hidden /><div><div className="row" style={{ gap: 6 }}><strong className="small">{a.action.replace(/_/g, ' ').toLowerCase()}</strong><ResultIcon result={a.result} /></div><div className="small">{a.reason}</div><div className="small muted">{fmtTime(a.at)} · {a.actor}</div></div></li>)}</ol>
+            {audit.length > 8 && <Link className="small" to={`/audit?q=${t.displayId}`}>All {audit.length} events in Audit Logs →</Link>}
           </section>
         </div>
-      )}
+      </div>
 
-      {modal && 'kind' in modal && (modal.kind === 'REJECT' || modal.kind === 'REQUEST_REVIEW' || modal.kind === 'ESCALATE' || modal.kind === 'REOPEN' || modal.kind === 'REOPEN_EMP' || modal.kind === 'REJECT_STEP') && (
-        <Modal title={{ REJECT: 'Reject plan', REQUEST_REVIEW: 'Request review', ESCALATE: 'Escalate ticket', REOPEN: 'Reopen ticket', REOPEN_EMP: 'Simulate employee reopening', REJECT_STEP: `Reject step ${pausedStep?.id ?? ''}` }[modal.kind]} onClose={() => setModal(null)}
-          footer={<><button className="btn" onClick={() => setModal(null)}>Cancel</button><button className={`btn ${modal.kind === 'REJECT' || modal.kind === 'ESCALATE' ? 'btn-danger-solid' : 'btn-primary'}`} disabled={reason.trim().length < 3 || submitting} onClick={() => {
-            const k = modal.kind;
-            const r = k === 'REOPEN' || k === 'REOPEN_EMP' ? run({ type: 'REOPEN', ticketId: t.id, reason, byEmployee: k === 'REOPEN_EMP' }) : run({ type: k, ticketId: t.id, reason });
-            if (r?.ok) setModal(null);
-          }}>Confirm</button></>}>
-          <label className="field">Reason (required)<textarea data-autofocus value={reason} onChange={(e) => setReason(e.target.value)} /></label>
-          <p className="small muted">{modal.kind === 'REOPEN' || modal.kind === 'REOPEN_EMP' ? 'Reopening clears the verified flag and closure timestamps; previous executions and audit are retained.' : 'Recorded in the audit log with your simulated role.'}</p>
+      {modal === 'approve' && rb && d && (
+        <Modal title="Approve & execute this fix?" onClose={() => setModal(null)} footer={<><button className="btn" onClick={() => setModal(null)}>Cancel</button><button className="btn btn-primary" data-testid="confirm-approve" disabled={!ack || busy} onClick={() => { const r = run({ type: 'APPROVE', ticketId: t.id, acknowledged: ack }); if (r?.ok) setModal(null); }}>Approve &amp; Execute</button></>}>
+          <dl className="kv">
+            <dt>Incident · device</dt><dd>{t.displayId} · {dev.name} ({emp.name})</dd>
+            <dt>Action</dt><dd>{rb.title}</dd>
+            <dt>Confidence</dt><dd>{d.confidence}% (simulated, threshold {state.settings.confidenceThreshold}%)</dd>
+            <dt>Risk &amp; impact</dt><dd><RiskBadge risk={d.risk} /> {rb.employeeImpact}</dd>
+            <dt>Employee consent</dt><dd>{g.needsConsent ? 'Required — the employee is asked before it starts' : 'Not needed'}</dd>
+            <dt>Rollback</dt><dd>{rb.reversible ? rb.rollbackSteps.join('; ') : <strong className="warn-text">Not reversible — {rb.recoveryNote}</strong>}</dd>
+            {sim.failures.length > 0 && <><dt>History</dt><dd className="warn-text">{sim.failures.length} similar AI fix(es) failed before</dd></>}
+          </dl>
+          <p className="small muted">Prerequisites (laptop online, compatible, battery, consent) are re-checked right before execution — approval never overrides them.</p>
+          <label className="check"><input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} data-testid="ack" />I have reviewed the proposed action and its risks.</label>
         </Modal>
       )}
-      {modal && modal.kind === 'SCHEDULE' && d && rb && (
-        <Modal title={d.risk === 'HIGH' ? 'Approve high-risk plan & schedule' : 'Approve & schedule'} onClose={() => setModal(null)}
-          footer={<><button className="btn" onClick={() => setModal(null)}>Cancel</button><button className="btn btn-primary" data-testid="confirm-schedule" disabled={submitting || (d.risk === 'HIGH' && !impactOk) || !schedAt} onClick={() => { const r = run({ type: 'APPROVE', ticketId: t.id, scheduleAt: new Date(schedAt).toISOString(), impactConfirmed: impactOk }); if (r?.ok) setModal(null); }}>Approve &amp; schedule</button></>}>
-          <dl className="kv"><dt>Plan</dt><dd>{rb.id} v{rb.version} — {rb.title}</dd><dt>Device</dt><dd>{dev.name}</dd><dt>Risk</dt><dd><RiskBadge risk={d.risk} /> score <ScoreBadge score={d.confidence} /></dd><dt>Impact</dt><dd>{rb.disruptive ? `Disruptive for ~${rb.expectedMin} min; employee consent required before execution` : 'Non-disruptive'}</dd><dt>Rollback</dt><dd>{rb.reversible ? rb.rollbackSteps.join('; ') : rb.recoveryNote}</dd></dl>
-          <label className="field">Maintenance window start ({TZ})<input type="datetime-local" data-autofocus value={schedAt} min={toLocalInput(now + MIN)} max={toLocalInput(now + 24 * 60 * MIN)} onChange={(e) => setSchedAt(e.target.value)} /><span className="hint">Between now + 1 minute and now + 24 hours. Approval remains valid until {state.policy.approvalTTLMin} min after the window.</span></label>
-          <label className="check"><input type="checkbox" checked={impactOk} onChange={(e) => setImpactOk(e.target.checked)} data-testid="impact-confirm" />I confirm the impact, maintenance window and rollback limits above{d.risk === 'HIGH' ? ' (required for HIGH risk)' : ''}.</label>
+      {(modal === 'reject' || modal === 'investigate') && (
+        <Modal title={modal === 'reject' ? 'Reject recommendation' : 'Investigate manually'} onClose={() => setModal(null)} footer={<><button className="btn" onClick={() => setModal(null)}>Cancel</button><button className={`btn ${modal === 'reject' ? 'btn-danger-solid' : 'btn-primary'}`} data-testid="confirm-decision" disabled={modal === 'reject' && reason.trim().length < 3} onClick={() => { const r = run(modal === 'reject' ? { type: 'REJECT', ticketId: t.id, reason } : { type: 'INVESTIGATE', ticketId: t.id, reason }); if (r?.ok) setModal(null); }}>{modal === 'reject' ? 'Reject' : 'Start investigation'}</button></>}>
+          <label className="field">{modal === 'reject' ? 'Reason (required)' : 'Note (optional)'}<textarea data-autofocus value={reason} onChange={(e) => setReason(e.target.value)} /></label>
+          <p className="small muted">Nothing will be executed. The incident moves to manual investigation with its full history.</p>
         </Modal>
       )}
-      {modal && modal.kind === 'STEP' && pausedStep && rb && (
-        <Modal title={`Approve step ${pausedStep.id}`} onClose={() => setModal(null)}
-          footer={<><button className="btn" onClick={() => setModal(null)}>Cancel</button><button className="btn btn-primary" data-testid="confirm-step" disabled={submitting || (pausedStep.risk === 'HIGH' && !impactOk)} onClick={() => { const r = run({ type: 'APPROVE_STEP', ticketId: t.id, impactConfirmed: impactOk, scheduleAt: schedAt ? new Date(schedAt).toISOString() : undefined }); if (r?.ok) setModal(null); }}>{schedAt ? 'Approve & schedule step' : 'Approve & run step now'}</button></>}>
-          <dl className="kv"><dt>Step</dt><dd>{pausedStep.id} · {pausedStep.description}</dd><dt>Type · risk</dt><dd>{pausedStep.type} · <RiskBadge risk={pausedStep.risk} /></dd><dt>Expected result</dt><dd>{pausedStep.expectedResult}</dd><dt>Verification</dt><dd>{pausedStep.verification}</dd><dt>Recovery</dt><dd>{rb.reversible ? rb.rollbackSteps.join('; ') : rb.recoveryNote}</dd><dt>Scope</dt><dd>{t.displayId} · {dev.name} · {rb.actionKey} · {rb.id} v{rb.version} · plan <span className="mono">{d?.planHash.slice(0, 8)}</span></dd></dl>
-          <label className="field">Optional: schedule this step ({TZ})<input type="datetime-local" value={schedAt} min={toLocalInput(now + MIN)} max={toLocalInput(now + 24 * 60 * MIN)} onChange={(e) => setSchedAt(e.target.value)} /><span className="hint">Leave empty to run now. Changing the runbook, plan or policy before it runs invalidates this approval.</span></label>
-          <label className="check"><input type="checkbox" checked={impactOk} onChange={(e) => setImpactOk(e.target.checked)} data-testid="step-impact-confirm" />I confirm the impact and recovery limits of this step{pausedStep.risk === 'HIGH' ? ' (required for HIGH risk)' : ''}.</label>
-        </Modal>
-      )}
-      {modal && modal.kind === 'MANUAL' && (
-        <Modal title="Resolve manually" onClose={() => setModal(null)}
-          footer={<><button className="btn" onClick={() => setModal(null)}>Cancel</button><button className="btn btn-primary" data-testid="confirm-manual" disabled={submitting || manual.note.trim().length < 5 || manual.evidence.trim().length < 3 || !manual.verified} onClick={() => { const r = run({ type: 'RESOLVE_MANUAL', ticketId: t.id, ...manual }); if (r?.ok) setModal(null); }}>Resolve</button></>}>
-          <label className="field">Resolution note (required)<textarea data-autofocus value={manual.note} onChange={(e) => setManual({ ...manual, note: e.target.value })} placeholder="What you did to fix it" /></label>
-          <label className="field">Verification evidence (required)<input type="text" value={manual.evidence} onChange={(e) => setManual({ ...manual, evidence: e.target.value })} placeholder="e.g. app launched 5 times without crash" /></label>
-          <label className="check"><input type="checkbox" checked={manual.verified} onChange={(e) => setManual({ ...manual, verified: e.target.checked })} />I verified the fix with the employee/device (recorded as {role === 'ADMIN' ? 'Morgan' : 'Alex'}, path Manual).</label>
+      {modal === 'resolve' && (
+        <Modal title="Resolve manually" wide onClose={() => setModal(null)} footer={<><button className="btn" onClick={() => setModal(null)}>Cancel</button><button className="btn btn-primary" data-testid="confirm-resolve" disabled={busy || res.rootCause.trim().length < 3 || res.steps.trim().length < 3 || res.verification.trim().length < 3 || (res.save && (!res.title.trim() || !res.pattern.trim() || !(lines(res.employeeSteps).length || lines(res.adminSteps).length)))}
+          onClick={() => { const r = run({ type: 'RESOLVE_MANUAL', ticketId: t.id, rootCause: res.rootCause, steps: res.steps, verification: res.verification, knowledge: res.save ? { title: res.title, pattern: res.pattern, diagnosticQuestions: lines(res.questions), conditions: res.conditions, employeeSteps: lines(res.employeeSteps), adminSteps: lines(res.adminSteps), expectedOutcome: res.expectedOutcome, verification: res.verification, risks: res.risks, rollback: res.rollback } : undefined }); if (r?.ok) setModal(null); }}>Resolve{res.save ? ' & save resolution' : ''}</button></>}>
+          <div className="grid grid-3">
+            <label className="field">Root cause *<textarea data-autofocus value={res.rootCause} onChange={(e) => setRes({ ...res, rootCause: e.target.value })} /></label>
+            <label className="field">What you did to fix it *<textarea value={res.steps} onChange={(e) => setRes({ ...res, steps: e.target.value })} /></label>
+            <label className="field">How you verified it *<textarea value={res.verification} onChange={(e) => setRes({ ...res, verification: e.target.value })} /></label>
+          </div>
+          <label className="check"><input type="checkbox" checked={res.save} onChange={(e) => setRes({ ...res, save: e.target.checked })} data-testid="save-knowledge" />Save as reusable resolution (AI uses it for similar incidents once validated)</label>
+          {res.save && (
+            <div className="grid grid-2 sim-box">
+              <label className="field">Title *<input type="text" value={res.title} onChange={(e) => setRes({ ...res, title: e.target.value })} /></label>
+              <label className="field">Issue pattern (words that describe it) *<input type="text" value={res.pattern} onChange={(e) => setRes({ ...res, pattern: e.target.value })} data-testid="k-pattern" /></label>
+              <label className="field">Diagnostic questions (one per line)<textarea value={res.questions} onChange={(e) => setRes({ ...res, questions: e.target.value })} /></label>
+              <label className="field">Applicable conditions<textarea value={res.conditions} onChange={(e) => setRes({ ...res, conditions: e.target.value })} /></label>
+              <label className="field">Safe employee steps (one per line)<textarea value={res.employeeSteps} onChange={(e) => setRes({ ...res, employeeSteps: e.target.value })} data-testid="k-employee-steps" /></label>
+              <label className="field">Administrator remediation steps (one per line)<textarea value={res.adminSteps} onChange={(e) => setRes({ ...res, adminSteps: e.target.value })} data-testid="k-admin-steps" /></label>
+              <label className="field">Expected outcome<input type="text" value={res.expectedOutcome} onChange={(e) => setRes({ ...res, expectedOutcome: e.target.value })} /></label>
+              <label className="field">Relevant risks<input type="text" value={res.risks} onChange={(e) => setRes({ ...res, risks: e.target.value })} /></label>
+              <label className="field">Rollback instructions (if any)<input type="text" value={res.rollback} onChange={(e) => setRes({ ...res, rollback: e.target.value })} /></label>
+              <p className="small muted" style={{ gridColumn: '1 / -1', margin: 0 }}>Verification criteria = “How you verified it”. Saved resolutions are not used until an administrator validates them.</p>
+            </div>
+          )}
         </Modal>
       )}
     </div>

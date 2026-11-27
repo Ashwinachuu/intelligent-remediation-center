@@ -15,6 +15,7 @@ interface Store {
   dispatch: (a: Action) => ActionResult;
   tick: () => void;
   reset: () => void;
+  replaceState: (s: AppState, message?: string) => void;
   reloadFromStorage: () => void;
   toast: (kind: Toast['kind'], text: string) => void;
   dismissToast: (id: number) => void;
@@ -57,11 +58,17 @@ export const useStore = create<Store>((set, get) => ({
     const withEvent: AppState = {
       ...fresh,
       seq: { ...fresh.seq, audit: fresh.seq.audit + 1 },
-      audit: [...fresh.audit, { id: `reset-${Date.now()}`, seq: fresh.seq.audit + 1, at: new Date().toISOString(), actor: 'Reviewer', role: get().state.settings.role, action: 'DEMO_RESET', reason: 'Demo data reset by reviewer (explicit destructive action)', metadata: {}, result: 'INFO' }],
+      audit: [...fresh.audit, { id: `reset-${Date.now()}`, seq: fresh.seq.audit + 1, at: new Date().toISOString(), actor: 'Reviewer', role: get().state.ui.role, action: 'DEMO_RESET', reason: 'Demo data reset by reviewer (explicit destructive action)', metadata: {}, result: 'INFO' }],
     };
     saveState(storage, withEvent);
     set({ state: withEvent, warning: undefined });
     get().toast('info', 'Demo data reset');
+    broadcast();
+  },
+  replaceState: (next, message) => {
+    const err = saveState(storage, next);
+    set({ state: next, storageError: err, now: Date.now() });
+    if (message) get().toast('success', message);
     broadcast();
   },
   reloadFromStorage: () => { const r = loadState(storage, Date.now()); set({ state: r.state, warning: r.warning, multiTab: false }); },
