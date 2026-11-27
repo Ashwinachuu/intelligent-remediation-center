@@ -192,3 +192,20 @@ test('Every route works for both roles; mobile layouts have no horizontal overfl
   await page.getByTestId('role-admin').click();
   for (const r of ['overview', 'workspace', 'incidents', 'approvals', 'opportunities', 'audit', 'settings']) { await page.goto(`/#/${r}`); await expect(page.locator('h1').first()).toBeVisible(); expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth), r).toBeLessThanOrEqual(1); }
 });
+
+test('Two tabs stay in sync without warnings', async ({ page, context }) => {
+  await fresh(page);
+  const other = await context.newPage();
+  await other.goto('/#/approvals');
+  const rows = other.getByTestId('approval-queue').locator('tbody tr');
+  await expect(rows).toHaveCount(1);
+  await page.goto('/#/approvals');
+  await page.getByTestId('approval-queue').locator('tbody tr').first().click();
+  await page.getByTestId('reject').click();
+  await page.getByLabel('Reason (required)').fill('Change freeze');
+  await page.getByTestId('confirm-decision').click();
+  await expect(other.getByText('No fixes are waiting for approval')).toBeVisible();
+  await expect(page.getByText(/open in another tab/)).toHaveCount(0);
+  await expect(other.getByText(/open in another tab/)).toHaveCount(0);
+  await other.close();
+});

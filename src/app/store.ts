@@ -1,14 +1,13 @@
 import { create } from 'zustand';
 import { applyAction, processDue, type Action, type ActionResult } from '../domain/engine';
 import type { AppState } from '../domain/types';
-import { loadState, saveState, STORAGE_KEY } from '../data/persistence';
+import { loadState, saveState, STORAGE_KEY, validateState } from '../data/persistence';
 import { buildSeed } from '../data/seed';
 
 export interface Toast { id: number; kind: 'success' | 'error' | 'info'; text: string }
 interface Store {
   state: AppState;
   warning?: string;
-  multiTab: boolean;
   storageError?: string;
   toasts: Toast[];
   now: number;
@@ -16,7 +15,6 @@ interface Store {
   tick: () => void;
   reset: () => void;
   replaceState: (s: AppState, message?: string) => void;
-  reloadFromStorage: () => void;
   toast: (kind: Toast['kind'], text: string) => void;
   dismissToast: (id: number) => void;
   dismissWarning: () => void;
@@ -28,7 +26,6 @@ const initial = loadState(storage, Date.now());
 export const useStore = create<Store>((set, get) => ({
   state: initial.state,
   warning: initial.warning,
-  multiTab: false,
   toasts: [],
   now: Date.now(),
   dispatch: (a) => {
@@ -37,7 +34,6 @@ export const useStore = create<Store>((set, get) => ({
     if (r.state !== get().state) {
       const err = saveState(storage, r.state);
       set({ state: r.state, storageError: err, now });
-      broadcast();
     }
     if (r.ok && r.message) get().toast('success', r.message);
     if (!r.ok && r.error) get().toast('error', r.error.message);
@@ -50,7 +46,6 @@ export const useStore = create<Store>((set, get) => ({
     if (next !== s) {
       const err = saveState(storage, next);
       set({ state: next, now, storageError: err });
-      broadcast();
     } else set({ now });
   },
   reset: () => {
@@ -63,15 +58,12 @@ export const useStore = create<Store>((set, get) => ({
     saveState(storage, withEvent);
     set({ state: withEvent, warning: undefined });
     get().toast('info', 'Demo data reset');
-    broadcast();
   },
   replaceState: (next, message) => {
     const err = saveState(storage, next);
     set({ state: next, storageError: err, now: Date.now() });
     if (message) get().toast('success', message);
-    broadcast();
   },
-  reloadFromStorage: () => { const r = loadState(storage, Date.now()); set({ state: r.state, warning: r.warning, multiTab: false }); },
   toast: (kind, text) => {
     const id = ++toastId;
     set({ toasts: [...get().toasts.slice(-3), { id, kind, text }] });
@@ -81,22 +73,12 @@ export const useStore = create<Store>((set, get) => ({
   dismissWarning: () => set({ warning: undefined }),
 }));
 
-// ---- Multi-tab detection: warn (no production concurrency claims). ----
-const TAB_ID = Math.random().toString(36).slice(2);
-let channel: BroadcastChannel | null = null;
-function broadcast() { try { channel?.postMessage({ type: 'changed', from: TAB_ID }); } catch { /* ignore */ } }
+// ---- Keep tabs in sync: when another tab saves, adopt its state (all tabs share one saved demo). ----
 if (typeof window !== 'undefined') {
-  try {
-    channel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('remediation-center') : null;
-    channel?.addEventListener('message', (ev: MessageEvent) => {
-      const m = ev.data as { type: string; from: string };
-      if (m.from === TAB_ID) return;
-      if (m.type === 'hello') channel?.postMessage({ type: 'here', from: TAB_ID });
-      useStore.setState({ multiTab: true });
-    });
-    channel?.postMessage({ type: 'hello', from: TAB_ID });
-  } catch { /* ignore */ }
-  window.addEventListener('storage', (e) => { if (e.key === STORAGE_KEY) useStore.setState({ multiTab: true }); });
+  window.addEventListener('storage', (e) => {
+    if (e.key !== STORAGE_KEY || !e.newValue) return;
+    try { const next: unknown = JSON.parse(e.newValue); if (validateState(next)) useStore.setState({ state: next, now: Date.now() }); } catch { /* ignore unreadable updates */ }
+  });
 }
 
 export const useAppState = () => useStore((s) => s.state);

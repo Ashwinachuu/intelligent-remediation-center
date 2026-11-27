@@ -35,7 +35,7 @@ function useOutsideClose(open: boolean, close: () => void) {
 
 export function Shell() {
   const state = useStore((s) => s.state);
-  const { warning, multiTab, storageError, toasts } = useStore();
+  const { warning, storageError, toasts } = useStore();
   const tick = useStore((s) => s.tick);
   const dispatch = useStore((s) => s.dispatch);
   const [drawer, setDrawer] = useState(false);
@@ -133,7 +133,6 @@ export function Shell() {
           </header>
           <main id="main" className="content" tabIndex={-1}>
             {warning && <div className="banner warn" role="alert"><AlertTriangle size={18} aria-hidden /><div className="grow">{warning}</div><button className="btn btn-sm" onClick={() => useStore.getState().dismissWarning()}>Dismiss</button></div>}
-            {multiTab && <div className="banner warn" role="status"><AlertTriangle size={18} aria-hidden /><div className="grow">This demo is open in another tab. One tab is recommended — changes from other tabs are not merged.</div><button className="btn btn-sm" onClick={() => useStore.getState().reloadFromStorage()}>Reload saved state</button></div>}
             {storageError && <div className="banner danger" role="alert"><AlertTriangle size={18} aria-hidden /><div className="grow">Could not save to browser storage ({storageError}). Reset the demo to free space.</div></div>}
             <Outlet />
           </main>
