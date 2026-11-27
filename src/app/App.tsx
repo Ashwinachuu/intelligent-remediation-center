@@ -9,6 +9,7 @@ import { OpportunitiesPage } from '../pages/Opportunities';
 import { PoliciesPage } from '../pages/Policies';
 import { AuditPage } from '../pages/Audit';
 import { NotFoundPage } from '../pages/NotFound';
+import { GuidePage } from '../pages/Guide';
 
 export function AppRoutes() {
   return (
@@ -16,6 +17,7 @@ export function AppRoutes() {
       <Route element={<Shell />}>
         <Route index element={<Navigate to="/overview" replace />} />
         <Route path="/overview" element={<OverviewPage />} />
+        <Route path="/guide" element={<GuidePage />} />
         <Route path="/incidents" element={<IncidentsPage />} />
         <Route path="/incidents/:id" element={<IncidentDetailPage />} />
         <Route path="/approvals" element={<ApprovalsPage />} />

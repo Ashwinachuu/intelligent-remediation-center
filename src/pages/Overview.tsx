@@ -19,8 +19,8 @@ const PRESETS = [{ k: 'today', l: 'Today', d: 1 }, { k: '7', l: '7 days', d: 7 }
 
 function useFilters(now: number): [Filters, URLSearchParams, (k: Record<string, string | null>) => void] {
   const [p, setP] = useSearchParams();
-  const preset = p.get('preset') ?? '30';
-  const def = defaultRange(now, PRESETS.find((x) => x.k === preset)?.d ?? 30);
+  const preset = p.get('preset') ?? '7';
+  const def = defaultRange(now, PRESETS.find((x) => x.k === preset)?.d ?? 7);
   const from = preset === 'custom' ? p.get('from') ?? def.from : def.from;
   const to = preset === 'custom' ? p.get('to') ?? def.to : def.to;
   const f: Filters = { from: from <= to ? from : to, to: from <= to ? to : from, source: (p.get('source') || undefined) as Filters['source'], category: (p.get('category') || undefined) as Filters['category'], group: (p.get('group') || undefined) as Filters['group'], path: (p.get('path') || undefined) as Filters['path'] };
@@ -58,7 +58,7 @@ export function OverviewPage() {
   const now = useStore((s) => s.now);
   const nav = useNavigate();
   const [f, p, set] = useFilters(now);
-  const preset = p.get('preset') ?? '30';
+  const preset = p.get('preset') ?? '7';
   const prev = previousPeriod(f);
   const data = useMemo(() => {
     const k = kpis(state, f), kp = kpis(state, prev);
@@ -79,7 +79,7 @@ export function OverviewPage() {
   return (
     <div>
       <div className="page-head">
-        <div><h1>Endpoint remediation overview</h1><p>Intake cohort: tickets <strong>created</strong> {f.from} → {f.to} (inclusive, local time) matching filters, measured as of now. All durations and savings are <strong>modeled</strong> from category baselines, not measured outcomes.</p></div>
+        <div><h1>Endpoint remediation overview</h1><p>Intake cohort: tickets <strong>created</strong> {f.from} → {f.to} (inclusive, local time) matching filters, measured as of now. All durations and savings are <strong>modeled</strong> from category baselines, not measured outcomes. New here? <Link to="/guide">How it works →</Link></p></div>
       </div>
       <Workspace />
       <h2 style={{ marginTop: 24 }}>Analytics</h2>
@@ -90,7 +90,7 @@ export function OverviewPage() {
         <label className="field">Category<select value={f.category ?? ''} onChange={(e) => set({ category: e.target.value })}><option value="">All</option>{CATEGORIES.map((c) => <option key={c} value={c}>{CATEGORY_LABEL[c]}</option>)}</select></label>
         <label className="field">Device group<select value={f.group ?? ''} onChange={(e) => set({ group: e.target.value })}><option value="">All</option><option>Standard</option><option>Critical</option></select></label>
         <label className="field">Path<select value={f.path ?? ''} onChange={(e) => set({ path: e.target.value })}><option value="">All</option><option value="AUTO_POLICY">Auto (policy)</option><option value="HUMAN_APPROVED">Human-approved</option><option value="MANUAL">Manual</option><option value="NONE">Pending / none</option></select></label>
-        <button className="btn" disabled={!dims && preset === '30'} onClick={() => set({ preset: null, from: null, to: null, source: null, category: null, group: null, path: null })}><FilterX size={14} aria-hidden />Clear filters</button>
+        <button className="btn" disabled={!dims && preset === '7'} onClick={() => set({ preset: null, from: null, to: null, source: null, category: null, group: null, path: null })}><FilterX size={14} aria-hidden />Clear filters</button>
       </div>
 
       <h2 style={{ marginTop: 8 }}>Outcomes &amp; guardrails</h2>

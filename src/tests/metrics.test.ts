@@ -79,7 +79,7 @@ describe('persistence and export', () => {
     expect(validateState(r.state)).toBe(true);
     const again = loadState(storage, NOW);
     expect(again.warning).toBeUndefined();
-    expect(Object.keys(again.state.tickets)).toHaveLength(372);
+    expect(Object.keys(again.state.tickets)).toHaveLength(29);
   });
   it('CSV cells are protected against spreadsheet injection', () => {
     expect(csvCell('=SUM(A1)')).toBe("'=SUM(A1)");

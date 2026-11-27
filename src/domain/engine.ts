@@ -429,7 +429,7 @@ export function processDue(state: AppState, now: number, timing: Timing = LIVE_T
 // ---------------------------------------------------------------------------------------------
 export interface CreateTicketInput {
   title: string; description: string; requester: string; source: 'EMPLOYEE' | 'DETECTION'; priority: 'P2' | 'P3' | 'P4';
-  category: Category | 'CUSTOM'; outcome: Outcome; deviceId?: string; newDevice?: Partial<Device>; scenario?: ScenarioKey | 'CUSTOM' | 'HISTORICAL'; demo?: boolean; owner?: string;
+  category: Category | 'CUSTOM'; outcome: Outcome; deviceId?: string; newDevice?: Partial<Device>; scenario?: ScenarioKey | 'CUSTOM' | 'HISTORICAL'; demo?: boolean; owner?: string; example?: string;
 }
 export type Action =
   | { type: 'CREATE_TICKET'; input: CreateTicketInput }
@@ -499,7 +499,7 @@ function createTicket(tx: Tx, input: CreateTicketInput): string {
     id, displayId: `INC-${1000 + seq}`, title, description, requester: input.requester, deviceId: device.id, source: input.source, category, priority: input.priority,
     status: 'OPEN', createdAt: tx.nowIso, updatedAt: tx.nowIso, owner: input.owner ?? 'Alex', eligibleAtIntake: false, intakePolicyVersion: tx.policy.version,
     baselineAgentMin: b.agentMin, baselineResolutionMin: b.resolutionMin, agentMin: 0, verified: false, reopenedCount: 0, outcome: input.outcome, executionIds: [],
-    eligibilityReason: '', slaDueAt: iso(tx.now + SLA_HOURS[input.priority] * 60 * MIN), scenario: input.scenario ?? (input.category === 'CUSTOM' ? 'CUSTOM' : undefined), addedEvidence: [], reviewDecisions: 0, recoveries: 0, reworks: 0, scheduledDelayMin: 0, demo: input.demo,
+    eligibilityReason: '', slaDueAt: iso(tx.now + SLA_HOURS[input.priority] * 60 * MIN), scenario: input.scenario ?? (input.category === 'CUSTOM' ? 'CUSTOM' : undefined), addedEvidence: [], reviewDecisions: 0, recoveries: 0, reworks: 0, scheduledDelayMin: 0, demo: input.demo, example: input.example,
   };
   tx.s.tickets = { ...tx.s.tickets, [id]: t };
   tx.audit({ ticketId: id, action: 'TICKET_CREATED', to: 'OPEN', reason: `${input.source === 'DETECTION' ? 'Proactive detection' : 'Employee report'}: ${title}`, metadata: {

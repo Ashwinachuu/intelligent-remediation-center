@@ -16,7 +16,7 @@ All behaviour is simulated. There are no external APIs and no real endpoint comm
 | New: `StepApproval` | scoped to execution, step, device, action key, runbook id + version and plan hash |
 | `settings.assumptions` | hourly cost, currency, per-category manual baselines |
 
-The storage key stays `remediation-center:v1`, and the schema version is now 2. Data from v1 fails validation and is safely reset with a warning, as Spec §2 requires.
+The storage key stays `remediation-center:v1`, and the schema version is now 3 (bumped again when the curated dataset replaced the large history). Data from v1 fails validation and is safely reset with a warning, as Spec §2 requires.
 
 ## P0
 
@@ -180,6 +180,13 @@ Promotion goes one level at a time, needs an Admin and a documented reason, and 
 - **L4:** at L3, with ≥ 30 executions at ≥ 97 %.
 
 Demotion is always allowed. Seed state: RB-001 is L4 (the historical pilot), RB-003 is L2 and *eligible* for L3, and all other runbooks are L2.
+
+## Simplified demo dataset and "How it works" page
+
+* **Seed.** The 90-day, 360-ticket history has been replaced with **17 curated past incidents over 6 days, one per path** (`src/domain/examples.ts`, `src/data/seed.ts`), plus the 12 live demo tickets. Every example is created by real actions, so its audit trail is genuine.
+* **Dashboard.** The default range is now **7 days** so the numbers match the dataset.
+* **Maturity criteria.** Scaled to the small dataset: L3 needs ≥ 3 runs at ≥ 95 %; L4 needs ≥ 5 runs at ≥ 97 %.
+* **`/#/guide` (How it works).** The problem, the 7-step flow, the 3 safety rules, a "who decides" table computed from the current policy values, and the full scenario matrix. The matrix has 20 paths in 4 groups: fixed automatically or with one approval; stopped before any change; needs human judgement; something went wrong after a change. Every path links to its seeded example ticket and/or offers a live *Try it*.
 
 ## Demonstration scenarios
 

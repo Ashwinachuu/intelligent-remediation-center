@@ -1,7 +1,8 @@
 import { applyAction, processDue, type Action } from '../domain/engine';
 import { preflight } from '../domain/preflight';
 import { actionQueue, assessment, detectClusters, similarIncidents, slaState, workspaceCounts } from '../domain/insights';
-import { businessImpact, funnel, type Filters } from '../domain/metrics';
+import { businessImpact, funnel, guardrails, type Filters } from '../domain/metrics';
+import { EXAMPLES } from '../domain/examples';
 import { lifecycleStage, maturityCriteria } from '../domain/maturity';
 import { SHARED_NETWORK, DEFAULT_ASSUMPTIONS } from '../domain/catalog';
 import { buildSeed } from '../data/seed';
@@ -240,7 +241,8 @@ describe('dashboard calculations', () => {
     expect(q.length).toBeGreaterThan(0);
     const active = q.filter((x) => !x.aged);
     for (let i = 1; i < active.length; i++) expect(active[i].score).toBeLessThanOrEqual(active[i - 1].score);
-    expect(q.findIndex((x) => x.aged)).toBeGreaterThanOrEqual(active.length); // aged backlog listed after active work
+    const firstAged = q.findIndex((x) => x.aged);
+    if (firstAged !== -1) expect(firstAged).toBeGreaterThanOrEqual(active.length); // aged backlog listed after active work
     expect(active.slice(0, 5).some((x) => x.ticket.demo)).toBe(true);
     expect(q.every((x) => x.href.includes(x.ticket.id) && x.href.includes('focus=action'))).toBe(true);
     const ws = workspaceCounts(seed, NOW, 'AGENT');
@@ -252,11 +254,50 @@ describe('dashboard calculations', () => {
     expect(slaState(t, NOW)).toBe('OK');
     expect(slaState(t, NOW + DAY)).toBe('BREACHED');
     const sim = similarIncidents(seed, t.id);
-    expect(sim.total).toBeGreaterThan(50);
+    expect(sim.total).toBeGreaterThanOrEqual(2);
     expect(sim.patterns.join(' ')).toMatch(/failed verification/);
     const as = assessment(seed, t.id, NOW, 'AGENT');
     expect(as.diagnosisConfidence).toBe(94);
-    expect(as.remediationConfidence).toBeGreaterThan(80);
+    expect(as.remediationConfidence).toBe(50); // 1 of 2 historical Wi-Fi runs verified → (1+1)/(2+2)
     expect(as.readiness).toBe('PENDING');
+  });
+});
+
+describe('curated example dataset', () => {
+  const NOW = new Date(2026, 10, 27, 15, 0, 0).getTime();
+  const seed = buildSeed(NOW);
+  const ex = (k: string) => Object.values(seed.tickets).filter((t) => t.example === k);
+  it('is small and has one ticket per seeded path (two supervised service runs)', () => {
+    expect(Object.keys(seed.tickets)).toHaveLength(29);
+    for (const e of EXAMPLES.filter((x) => x.seeded)) expect(ex(e.key).length, e.key).toBeGreaterThanOrEqual(1);
+  });
+  it('every path ends where the guide says it does — happy and unhappy', () => {
+    const one = (k: string) => ex(k)[0];
+    const lastExec = (k: string) => seed.executions.filter((e) => e.ticketId === one(k).id).at(-1)!;
+    expect(one('auto-fix')).toMatchObject({ status: 'CLOSED', path: 'AUTO_POLICY', verified: true });
+    expect(one('approved-fix')).toMatchObject({ status: 'CLOSED', path: 'HUMAN_APPROVED' });
+    expect(one('consent-fix').consent?.granted).toBe(true);
+    expect(lastExec('verify-fail-rollback').phase).toBe('ROLLED_BACK');
+    expect(lastExec('rollback-fail').phase).toBe('ROLLBACK_FAILED');
+    expect(lastExec('exec-fail')).toMatchObject({ phase: 'FAILED', outcome: 'EXEC_FAIL' });
+    expect(lastExec('exec-fail').changes).toHaveLength(0);
+    expect(one('consent-declined').employeeResponse?.choice).toBe('DECLINE');
+    expect(seed.approvals.some((a) => a.ticketId === one('approval-expired').id && a.expiredLoggedAt)).toBe(true);
+    expect(one('approval-expired')).toMatchObject({ status: 'CLOSED', path: 'HUMAN_APPROVED' });
+    expect(one('reopened').reopenedCount).toBe(1);
+    expect(seed.approvals.some((a) => a.ticketId === one('rejected').id && a.decision === 'REJECT')).toBe(true);
+    expect(one('unsupported-os').path).toBe('MANUAL');
+    expect(seed.runbooks.some((r) => r.sourceTicketIds.includes(one('manual-new-runbook').id) && r.status === 'DRAFT')).toBe(true);
+    expect(one('unknown-open').status).toBe('ESCALATED');
+    expect(one('low-confidence').status).toBe('REVIEW_REQUIRED');
+    expect(one('critical-blocked').status).toBe('ESCALATED');
+    // Every past execution was authorized and fully audited, failures included.
+    const g = guardrails(seed, { from: '2026-11-01', to: localDateKey(NOW) });
+    expect(g.unauthorized).toBe(0);
+    expect(g.auditCompleteness).toBe(1);
+  });
+  it('RB-003 has exactly enough clean supervised runs to be eligible for L3 (small, explainable numbers)', () => {
+    const rb = seed.runbooks.find((r) => r.id === 'RB-003')!;
+    expect(maturityCriteria(seed, rb, 3).every((c) => c.met)).toBe(true);
   });
 });

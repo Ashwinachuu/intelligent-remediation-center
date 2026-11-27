@@ -324,9 +324,9 @@ export function IncidentDetailPage() {
             <div className="sim-box stack" aria-label="Simulation controls">
               <h3><AlertTriangle size={12} aria-hidden />Simulation controls (demo)</h3>
               <div className="row">
-                <button className="btn btn-sm" disabled={ro} onClick={() => run({ type: 'SET_DEVICE', ticketId: t.id, online: !dev.online })}>{dev.online ? <><WifiOff size={14} aria-hidden />Take device offline</> : <><Wifi size={14} aria-hidden />Simulate device reconnect</>}</button>
-                <button className="btn btn-sm" disabled={ro} onClick={() => run({ type: 'SET_DEVICE', ticketId: t.id, busy: !dev.busy })}>{dev.busy ? 'Mark employee available' : 'Mark employee busy'}</button>
-                <button className="btn btn-sm" data-testid="battery-toggle" disabled={ro} onClick={() => run({ type: 'SET_DEVICE', ticketId: t.id, batteryPct: dev.batteryPct < 30 ? 85 : 12 })}>{dev.batteryPct < 30 ? <><Battery size={14} aria-hidden />Plug in charger (85%)</> : <><BatteryLow size={14} aria-hidden />Drain battery (12%)</>}</button>
+                <button className="btn btn-sm" disabled={ro} onClick={() => dispatch({ type: 'SET_DEVICE', ticketId: t.id, online: !dev.online })}>{dev.online ? <><WifiOff size={14} aria-hidden />Take device offline</> : <><Wifi size={14} aria-hidden />Simulate device reconnect</>}</button>
+                <button className="btn btn-sm" disabled={ro} onClick={() => dispatch({ type: 'SET_DEVICE', ticketId: t.id, busy: !dev.busy })}>{dev.busy ? 'Mark employee available' : 'Mark employee busy'}</button>
+                <button className="btn btn-sm" data-testid="battery-toggle" disabled={ro} onClick={() => dispatch({ type: 'SET_DEVICE', ticketId: t.id, batteryPct: dev.batteryPct < 30 ? 85 : 12 })}>{dev.batteryPct < 30 ? <><Battery size={14} aria-hidden />Plug in charger (85%)</> : <><BatteryLow size={14} aria-hidden />Drain battery (12%)</>}</button>
               </div>
               {t.status === 'RESOLVED' && state.policy.closureMode === 'EMPLOYEE_CONFIRM' && <div className="row"><button className="btn btn-sm" disabled={ro} onClick={() => run({ type: 'EMPLOYEE_CONFIRM', ticketId: t.id })}>Simulate employee: confirm fixed</button><button className="btn btn-sm" disabled={ro} onClick={() => openReason('REOPEN_EMP')}>Simulate employee: still broken</button></div>}
               {t.status === 'CLOSED' && <div className="row"><button className="btn btn-sm" disabled={ro} onClick={() => openReason('REOPEN_EMP')}>Simulate employee: issue recurred</button></div>}

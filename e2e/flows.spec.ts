@@ -186,7 +186,7 @@ test('9. manager read-only; policy change invalidates pending approval; refresh 
 
 test('10. every route navigates, filters reset, mobile usable, no console errors', async ({ page }) => {
   await fresh(page);
-  for (const [label, heading] of [['Incidents', 'Incidents'], ['Approvals', 'Approvals'], ['Runbook library', 'Runbook library'], ['Opportunities', 'Automation opportunities'], ['Policies', 'Policies'], ['Audit log', 'Audit log'], ['Overview', 'Endpoint remediation overview']]) {
+  for (const [label, heading] of [['How it works', 'How it works'], ['Incidents', 'Incidents'], ['Approvals', 'Approvals'], ['Runbook library', 'Runbook library'], ['Opportunities', 'Automation opportunities'], ['Policies', 'Policies'], ['Audit log', 'Audit log'], ['Overview', 'Endpoint remediation overview']]) {
     await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: label }).click();
     await expect(page.getByRole('heading', { level: 1, name: heading })).toBeVisible();
   }
@@ -207,7 +207,7 @@ test('10. every route navigates, filters reset, mobile usable, no console errors
   await expect(page).not.toHaveURL(/status=/);
   // mobile
   await page.setViewportSize({ width: 375, height: 812 });
-  for (const r of ['overview', 'incidents', 'approvals', 'policies', 'audit', 'library', 'opportunities']) {
+  for (const r of ['overview', 'guide', 'incidents', 'approvals', 'policies', 'audit', 'library', 'opportunities']) {
     await page.goto(`/#/${r}`);
     await expect(page.locator('h1').first()).toBeVisible();
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
@@ -329,7 +329,7 @@ test('E6. AI draft lifecycle and maturity promotion require administrator valida
   await expect(page.getByText('No — guidance only (L1)')).toBeVisible();
   await page.goto('/#/library/RB-003');
   await page.getByTestId('promote').click();
-  await page.getByLabel('Documented reason (required)').fill('22 supervised runs, 100% verified');
+  await page.getByLabel('Documented reason (required)').fill('3 supervised runs, all verified');
   await page.getByTestId('confirm-maturity').click();
   await expect(page.getByText('L3 · Policy-based autonomous').first()).toBeVisible();
 });
@@ -344,4 +344,22 @@ test('E7. business impact recalculates from configurable assumptions', async ({ 
   await page.getByTestId('save-assumptions').click();
   await expect(row.locator('td').nth(1)).not.toHaveText(before!);
   await expect(page.getByText('Estimated', { exact: true })).toBeVisible();
+});
+
+test('E8. How it works: every path is listed with a real example or a live try-it', async ({ page }) => {
+  await fresh(page);
+  await page.getByRole('link', { name: 'How it works →' }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'How it works' })).toBeVisible();
+  const rows = page.locator('tr[data-example]');
+  expect(await rows.count()).toBe(20);
+  // Each row either links to a seeded example ticket or offers a live way to try it.
+  for (let i = 0; i < 20; i++) expect(await rows.nth(i).locator('a, button, .muted').count()).toBeGreaterThan(0);
+  await page.locator('tr[data-example="rollback-fail"]').getByRole('link').click();
+  await expect(status(page)).toHaveAttribute('data-status', 'CLOSED');
+  await page.getByRole('tab', { name: /Activity/ }).click();
+  await expect(page.getByText('rollback failed').first()).toBeVisible();
+  await page.goto('/#/guide');
+  await page.locator('tr[data-example="verify-fail-rollback"]').getByRole('button', { name: /Try it/ }).click();
+  await expect(status(page)).toHaveAttribute('data-status', 'AWAITING_APPROVAL');
+  await expect(page.locator('.detail-head')).toContainText('Demo scenario D');
 });

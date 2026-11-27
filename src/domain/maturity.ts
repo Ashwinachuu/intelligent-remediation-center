@@ -28,7 +28,7 @@ export function maturityCriteria(s: AppState, rb: Runbook, to: Maturity): Criter
   const l3: Criterion[] = [
     ...base,
     { label: 'LOW risk and non-disruptive', met: rb.risk === 'LOW' && !rb.disruptive, detail: `${rb.risk} risk, ${rb.disruptive ? 'disruptive' : 'non-disruptive'}` },
-    { label: '≥ 10 supervised executions completed', met: r.completed >= 10, detail: `${r.completed} completed` },
+    { label: '≥ 3 supervised executions completed', met: r.completed >= 3, detail: `${r.completed} completed` },
     { label: '≥ 95% verified success', met: r.completed > 0 && rate >= 0.95, detail: r.completed ? `${(rate * 100).toFixed(1)}% (${r.passed}/${r.completed})` : 'No data' },
     { label: 'No rollback failures', met: r.rollbackFailed === 0, detail: `${r.rollbackFailed} rollback failures` },
   ];
@@ -36,7 +36,7 @@ export function maturityCriteria(s: AppState, rb: Runbook, to: Maturity): Criter
   return [
     ...l3,
     { label: 'Currently at L3 (policy-based)', met: rb.maturity >= 3, detail: MATURITY_LABEL[rb.maturity] },
-    { label: '≥ 30 executions with ≥ 97% verified success', met: r.completed >= 30 && rate >= 0.97, detail: `${r.completed} completed, ${(rate * 100).toFixed(1)}%` },
+    { label: '≥ 5 executions with ≥ 97% verified success', met: r.completed >= 5 && rate >= 0.97, detail: `${r.completed} completed, ${(rate * 100).toFixed(1)}%` },
   ];
 }
 

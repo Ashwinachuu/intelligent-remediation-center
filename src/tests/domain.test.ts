@@ -13,7 +13,7 @@ const RILEY: Actor = { name: 'Riley', role: 'MANAGER' };
 
 export function emptyState(policy: Partial<Policy> = {}): AppState {
   return {
-    schemaVersion: 2, anchor: iso(T0), seq: { ticket: 0, audit: 0, runbook: 8, device: 0 }, devices: {}, tickets: {}, diagnoses: [], runbooks: seedRunbooks(iso(T0 - DAY)),
+    schemaVersion: 3, anchor: iso(T0), seq: { ticket: 0, audit: 0, runbook: 8, device: 0 }, devices: {}, tickets: {}, diagnoses: [], runbooks: seedRunbooks(iso(T0 - DAY)),
     policy: { ...DEFAULT_POLICY, ...policy }, policyHistory: [{ policy: { ...DEFAULT_POLICY, ...policy }, reason: 'test', actor: 'Morgan', role: 'ADMIN', at: iso(T0 - DAY) }],
     approvals: [], executions: [], jobs: [], audit: [], notifications: [], stepApprovals: [], settings: { role: 'AGENT', assumptions: DEFAULT_ASSUMPTIONS },
   };

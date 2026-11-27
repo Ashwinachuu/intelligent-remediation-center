@@ -11,6 +11,7 @@ import { loadScenario } from './scenarios';
 
 const NAV = [
   { to: '/overview', label: 'Overview', Icon: Gauge },
+  { to: '/guide', label: 'How it works', Icon: Info },
   { to: '/incidents', label: 'Incidents', Icon: ListChecks },
   { to: '/approvals', label: 'Approvals', Icon: CheckSquare },
   { to: '/library', label: 'Runbook library', Icon: BookOpen },

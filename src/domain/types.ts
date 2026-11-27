@@ -52,6 +52,8 @@ export interface Ticket {
   /** Shared-incident correlation: child -> parent link; parent lists children. */
   parentId?: string; childIds?: string[]; isParent?: boolean;
   employeeResponse?: EmployeeResponse;
+  /** Key of the curated example path this seeded ticket illustrates (see domain/examples.ts). */
+  example?: string;
 }
 
 export type EmployeeChoice = 'PROCEED' | 'SCHEDULE' | 'DECLINE' | 'ASSIST';
@@ -156,7 +158,7 @@ export interface AppNotification { id: string; ticketId?: string; recipient: 'EM
 export interface ScheduledJob { id: string; ticketId: string; dueAt: string; planHash: string; status: 'PENDING' | 'DONE' | 'CANCELLED'; createdAt: string; originalDueAt: string }
 
 export interface AppState {
-  schemaVersion: 2;
+  schemaVersion: 3;
   anchor: string;
   seq: { ticket: number; audit: number; runbook: number; device: number };
   devices: Record<string, Device>;

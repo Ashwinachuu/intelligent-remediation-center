@@ -2,7 +2,7 @@ import type { AppState } from '../domain/types';
 import { buildSeed } from './seed';
 
 export const STORAGE_KEY = 'remediation-center:v1';
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /** Shallow structural validation — rejects corrupt or incompatible payloads. */
 export function validateState(x: unknown): x is AppState {
