@@ -140,7 +140,7 @@ export function inferCategory(text: string): Category {
 
 /** Fictional employees. The demo employee is the person signed in to the employee portal. */
 export const EMPLOYEES: Employee[] = [
-  { id: 'EMP-012', name: 'Jordan Lee', department: 'Finance', email: 'jordan.lee@example.test', deviceName: 'LT-W11-0412', os: 'Windows 11' },
+  { id: 'EMP-012', name: 'Ashwin', department: 'Finance', email: 'ashwin@example.test', deviceName: 'LT-W11-0412', os: 'Windows 11' },
   { id: 'EMP-031', name: 'Priya Nair', department: 'Sales', email: 'priya.nair@example.test', deviceName: 'LT-W11-0431', os: 'Windows 11' },
   { id: 'EMP-044', name: 'Chris Morgan', department: 'Engineering', email: 'chris.morgan@example.test', deviceName: 'LT-W11-0444', os: 'Windows 11' },
   { id: 'EMP-057', name: 'Alex Kim', department: 'Marketing', email: 'alex.kim@example.test', deviceName: 'LT-MAC-0457', os: 'macOS' },

@@ -6,7 +6,7 @@ This is a working prototype for the Freshworks Senior PM assignment (Question 2,
 
 **Current version: V1.2, "Product Simplification & Employee-Admin Experience".** See [`docs/V1.2.md`](docs/V1.2.md). [`docs/Spec.md`](docs/Spec.md) is the original baseline. [`docs/ENHANCEMENTS.md`](docs/ENHANCEMENTS.md) describes V1.1. Where those documents conflict with V1.2, V1.2 wins.
 
-> **Demo mode: the AI and laptop actions are simulated.** All people, devices, tickets and numbers are fictional and generated in your browser. The app sends no real device commands, makes no AI calls and uses no integrations. Confidence scores are deterministic simulated values, not calibrated probabilities. This is an independent concept and not an official Freshworks product.
+> **Demo mode: the AI and laptop actions are simulated.** All people, devices, tickets and numbers are fictional and generated in your browser. The app sends no real device commands, makes no AI calls and uses no integrations. Confidence scores are deterministic simulated values, not calibrated probabilities.
 
 ## The approach in one minute (interview framing)
 
@@ -57,7 +57,7 @@ The first command creates a preview deployment. The second promotes to productio
 
 ## 2. Architecture
 
-* **React 18 + TypeScript + Vite**, a **Zustand** store, **Recharts** and plain CSS. State persists in `localStorage` (`remediation-center:v1`, schema v4). Invalid or older data resets safely with a warning.
+* **React 18 + TypeScript + Vite**, a **Zustand** store, **Recharts** and plain CSS. State persists in `localStorage` (`remediation-center:v1`, schema v5). Invalid or older data resets safely with a warning.
 * **Pure domain engine** (`src/domain/`). Every change goes through `applyAction(state, action, now)`. It checks role authorization and the transition table, and writes an audit entry for each state change. The UI holds no business logic.
 
 | File | Responsibility |

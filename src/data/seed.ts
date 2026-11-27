@@ -8,7 +8,7 @@ const emp = (id: string): Actor => ({ name: EMPLOYEES.find((e) => e.id === id)!.
 
 export function emptyState(anchorMs: number): AppState {
   return {
-    schemaVersion: 4, anchor: iso(anchorMs), seq: { ticket: 0, audit: 0, knowledge: 0, device: 0 }, devices: {}, tickets: {}, diagnoses: [], runbooks: seedRunbooks(), knowledge: [],
+    schemaVersion: 5, anchor: iso(anchorMs), seq: { ticket: 0, audit: 0, knowledge: 0, device: 0 }, devices: {}, tickets: {}, diagnoses: [], runbooks: seedRunbooks(), knowledge: [],
     settings: { ...DEFAULT_SETTINGS, baselines: { ...DEFAULT_SETTINGS.baselines } }, settingsHistory: [{ settings: DEFAULT_SETTINGS, reason: 'Prototype defaults (illustrative assumptions)', actor: 'System', at: iso(anchorMs - 8 * DAY) }],
     approvals: [], executions: [], audit: [], notifications: [], ui: { role: 'ADMIN' },
   };
@@ -125,7 +125,7 @@ export function buildSeed(anchorMs: number): AppState {
       const h = d.create('EMP-031', { title: 'Expense app freezes on submit', description: 'Expense tool hangs every time I submit.', issueType: 'APP_HANG' }, b + 90 * MIN);
       const t1 = d.answers(h, PATHS.appHangEscalate, b + 91 * MIN);
       A({ type: 'INVESTIGATE', ticketId: h, reason: 'Checking with the app vendor' }, t1 + 30 * MIN); }
-    // Today — Jordan (the demo employee): one waiting for approval, one mid-troubleshooting, one resolved by self-service
+    // Today — Ashwin (the demo employee): one waiting for approval, one mid-troubleshooting, one resolved by self-service
     { const now = anchorMs;
       const w = d.create('EMP-012', { title: 'Wi-Fi disconnects in the afternoon', description: 'Loses connection several times a day.', issueType: 'WIFI', demo: true }, now - 90 * MIN);
       d.answers(w, PATHS.wifiEscalate, now - 89 * MIN);

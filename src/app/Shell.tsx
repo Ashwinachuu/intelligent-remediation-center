@@ -86,15 +86,15 @@ export function Shell() {
               <NavLink key={to} to={to} end={to === '/my-tickets' ? false : undefined}><Icon size={16} aria-hidden />{label}{to === '/approvals' && pending > 0 && <span className="badge count-badge" aria-label={`${pending} pending`}>{pending}</span>}</NavLink>
             ))}
           </nav>
-          <div className="sidebar-foot">AI guides employees. Humans authorize remediation. AI executes and verifies. Validated human knowledge improves future recommendations.<br /><br />Independent concept — not an official Freshworks product.</div>
         </aside>
         <div className="main">
           <header className="topbar">
             <button className="btn btn-ghost btn-sm menu-btn" onClick={() => setDrawer(true)} aria-label="Open navigation"><Menu size={18} /></button>
-            <nav className="breadcrumb" aria-label="Breadcrumb">
-              <Link to={isAdmin ? '/overview' : '/my-tickets'}>Home</Link>
-              {crumbs.map((c, i) => <span key={i} className="row" style={{ gap: 6 }}><ChevronRight size={14} aria-hidden />{c.to ? <Link to={c.to}>{c.label}</Link> : <span className="current" aria-current="page">{c.label}</span>}</span>)}
-            </nav>
+            {crumbs.length > 1 ? (
+              <nav className="breadcrumb" aria-label="Breadcrumb">
+                {crumbs.map((c, i) => <span key={i} className="row" style={{ gap: 6 }}>{i > 0 && <ChevronRight size={14} aria-hidden />}{c.to ? <Link to={c.to}>{c.label}</Link> : <span className="current" aria-current="page">{c.label}</span>}</span>)}
+              </nav>
+            ) : <span className="breadcrumb" aria-hidden />}
             <div className="topbar-actions">
               <div className="seg role-switch" role="group" aria-label="View as">
                 <button aria-pressed={!isAdmin} data-testid="role-employee" onClick={() => switchRole('EMPLOYEE')}>Employee<span className="hide-sm"> · {DEMO_EMPLOYEE.name}</span></button>

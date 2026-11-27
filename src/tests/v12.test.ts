@@ -9,7 +9,7 @@ import type { Actor, AppState } from '../domain/types';
 import { DAY, MIN, localDateKey } from '../domain/util';
 
 const T0 = Date.parse('2026-11-20T10:00:00Z');
-const EMP: Actor = { name: 'Jordan Lee', role: 'EMPLOYEE' };
+const EMP: Actor = { name: 'Ashwin', role: 'EMPLOYEE' };
 const ADMIN: Actor = { name: 'Morgan (IT Admin)', role: 'ADMIN' };
 const act = (s: AppState, a: Action, actor: Actor, t = T0) => applyAction(s, a, t, { actor });
 function ok(s: AppState, a: Action, actor: Actor, t = T0) { const r = act(s, a, actor, t); if (!r.ok) throw new Error(`${a.type}: ${r.error?.message}`); return r; }

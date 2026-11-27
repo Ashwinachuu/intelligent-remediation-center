@@ -140,7 +140,7 @@ export interface AuditEvent {
 export interface AppNotification { id: string; ticketId?: string; recipient: Role; message: string; at: string; read: boolean }
 
 export interface AppState {
-  schemaVersion: 4;
+  schemaVersion: 5;
   anchor: string;
   seq: { ticket: number; audit: number; knowledge: number; device: number };
   devices: Record<string, Device>;

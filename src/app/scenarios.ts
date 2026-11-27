@@ -6,7 +6,7 @@ import { useStore } from './store';
 
 /**
  * Predefined demonstration scenarios (V1.2 §20). They replace the old visible simulation controls:
- * each creates a fresh ticket for the demo employee (Jordan Lee) and, where useful, plays the earlier steps
+ * each creates a fresh ticket for the demo employee (Ashwin) and, where useful, plays the earlier steps
  * through the real actions so the presenter starts at the interesting moment. Outcomes (e.g. a failing fix)
  * are part of the scenario definition, not toggles.
  */

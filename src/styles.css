@@ -44,7 +44,8 @@ p { margin: 0 0 8px; }
 .main { min-width: 0; display: flex; flex-direction: column; }
 .topbar { background: var(--surface); border-bottom: 1px solid var(--border); padding: 8px 24px; display: flex; gap: 12px; align-items: center; min-height: 56px; position: sticky; top: 0; z-index: 20; }
 .breadcrumb { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 13px; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.breadcrumb a { color: var(--muted); text-decoration: none; }
+.breadcrumb a { color: var(--accent); text-decoration: none; font-weight: 500; }
+.breadcrumb a:hover { text-decoration: underline; }
 .breadcrumb .current { color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
 .topbar-actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
 .btn.menu-btn { display: none; }
