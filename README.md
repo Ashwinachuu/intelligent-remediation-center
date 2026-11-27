@@ -57,7 +57,7 @@ The first command creates a preview deployment. The second promotes to productio
 
 ## 2. Architecture
 
-* **React 18 + TypeScript + Vite**, a **Zustand** store, **Recharts** and plain CSS. State persists in `localStorage` (`remediation-center:v1`, schema v5). Invalid or older data resets safely with a warning.
+* **React 18 + TypeScript + Vite**, a **Zustand** store, **Recharts** and plain CSS. State persists in `localStorage` (`remediation-center:v1`, schema v5). Older or unreadable saved data quietly reloads the demo seed.
 * **Pure domain engine** (`src/domain/`). Every change goes through `applyAction(state, action, now)`. It checks role authorization and the transition table, and writes an audit entry for each state change. The UI holds no business logic.
 
 | File | Responsibility |

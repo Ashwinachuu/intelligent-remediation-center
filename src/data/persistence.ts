@@ -30,11 +30,9 @@ export function loadState(storage: Storage | undefined, now: number): LoadResult
     try {
       const parsed = JSON.parse(raw);
       if (validateState(parsed)) return { state: parsed, fresh: false };
-    } catch { /* fallthrough */ }
-    const state = buildSeed(now);
-    saveState(storage, state);
-    return { state, fresh: true, warning: 'Saved demo data was corrupt or from an incompatible version and has been safely reset.' };
+    } catch { /* unreadable — fall through */ }
   }
+  // No saved data, an older version, or unreadable data: quietly start from the demo seed.
   const state = buildSeed(now);
   saveState(storage, state);
   return { state, fresh: true };

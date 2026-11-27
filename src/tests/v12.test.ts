@@ -247,13 +247,16 @@ describe('dashboard calculations', () => {
 });
 
 describe('persistence and audit export', () => {
-  it('corrupt or legacy storage resets safely with a warning', () => {
+  it('older or corrupt saved data quietly reloads the demo seed', () => {
     const store = new Map<string, string>();
     const storage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v); } } as unknown as Storage;
     store.set(STORAGE_KEY, JSON.stringify({ schemaVersion: 3, tickets: {} }));
     const r = loadState(storage, T0);
-    expect(r.warning).toMatch(/reset/);
+    expect(r.warning).toBeUndefined();
+    expect(r.fresh).toBe(true);
     expect(validateState(r.state)).toBe(true);
+    store.set(STORAGE_KEY, '{not json');
+    expect(validateState(loadState(storage, T0).state)).toBe(true);
   });
   it('CSV export protects against spreadsheet injection', () => {
     expect(csvCell('=SUM(A1)')).toBe("'=SUM(A1)");
