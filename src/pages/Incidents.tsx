@@ -10,6 +10,8 @@ import { METRIC_DEFS, STATUS_ORDER, ageMs, fmtAge, inRange, matchesDims, type Me
 import { STATUS_LABEL } from '../domain/transitions';
 import type { AppState, Ticket } from '../domain/types';
 import { Empty, PathBadge, RiskBadge, ScoreBadge, StatusBadge, fmtShort } from '../components/ui';
+import { SlaBadge } from '../components/Insights';
+import { slaState } from '../domain/insights';
 
 const PAGE = 20;
 const PRIORITY_RANK = { P2: 0, P3: 1, P4: 2 } as const;
@@ -34,6 +36,8 @@ export function filterTickets(s: AppState, p: URLSearchParams, now: number) {
     const d = currentDiagnosis(s, t);
     if (conf && BANDS[conf]) { if (!d || d.confidence < BANDS[conf][0] || d.confidence > BANDS[conf][1]) return false; }
     if (risk && d?.risk !== risk) return false;
+    const sla = p.get('sla');
+    if (sla && slaState(t, now) !== sla) return false;
     if (q && !(`${t.displayId} ${t.title} ${t.requester}`.toLowerCase().includes(q))) return false;
     return true;
   });
@@ -90,6 +94,7 @@ export function IncidentsPage() {
         <label className="field">Score band<select value={p.get('conf') ?? ''} onChange={(e) => set('conf', e.target.value)}><option value="">All</option><option value="lt60">&lt; 60</option><option value="60-79">60–79</option><option value="80-94">80–94</option><option value="95+">95+</option></select></label>
         <label className="field">Risk<select value={p.get('risk') ?? ''} onChange={(e) => set('risk', e.target.value)}><option value="">All</option><option value="LOW">Low</option><option value="MEDIUM">Medium</option><option value="HIGH">High</option></select></label>
         <label className="field">Category<select value={p.get('category') ?? ''} onChange={(e) => set('category', e.target.value)}><option value="">All</option>{CATEGORIES.map((c) => <option key={c} value={c}>{CATEGORY_LABEL[c]}</option>)}</select></label>
+        <label className="field">SLA<select value={p.get('sla') ?? ''} onChange={(e) => set('sla', e.target.value)}><option value="">All</option><option value="BREACHED">Breached</option><option value="AT_RISK">At risk</option><option value="OK">Within SLA</option><option value="MET">Met</option><option value="MISSED">Missed</option></select></label>
         <label className="field">Source<select value={p.get('source') ?? ''} onChange={(e) => set('source', e.target.value)}><option value="">All</option><option value="EMPLOYEE">Employee</option><option value="DETECTION">Detection</option></select></label>
         <label className="field">Path<select value={p.get('path') ?? ''} onChange={(e) => set('path', e.target.value)}><option value="">All</option><option value="AUTO_POLICY">Auto (policy)</option><option value="HUMAN_APPROVED">Human-approved</option><option value="MANUAL">Manual</option><option value="NONE">Pending / none</option></select></label>
         <label className="field">Created from<input type="date" value={p.get('from') ?? ''} onChange={(e) => { const n = new URLSearchParams(p); if (e.target.value) { n.set('from', e.target.value); if (!n.get('to')) n.set('to', e.target.value); } else { n.delete('from'); n.delete('to'); } n.delete('page'); setP(n, { replace: true }); }} /></label>
@@ -110,7 +115,7 @@ export function IncidentsPage() {
                   <td>{CATEGORY_LABEL[d?.category ?? t.category]}</td>
                   <td>{t.source === 'DETECTION' ? 'Detection' : 'Employee'}</td>
                   <td>{t.priority}</td>
-                  <td><StatusBadge status={t.status} /></td>
+                  <td><StatusBadge status={t.status} /><div style={{ marginTop: 4 }}><SlaBadge t={t} now={now} /></div>{t.parentId && <div className="small muted">Linked to {state.tickets[t.parentId]?.displayId}</div>}{t.isParent && <div className="small muted">Shared · {t.childIds?.length} linked</div>}</td>
                   <td><ScoreBadge score={d?.confidence} /></td>
                   <td><RiskBadge risk={d?.risk} /></td>
                   <td><PathBadge path={t.path} /></td>

@@ -1,7 +1,7 @@
 import type { AppState, Category, Path, Ticket, Execution, Status } from './types';
 import { currentDiagnosis, planRunbook } from './engine';
 import { MIN, addDaysKey, daysBetweenInclusive, localDateKey, localDayStart, median, ms, ratio } from './util';
-import { BASELINES } from './catalog';
+import { slaState } from './insights';
 
 export interface Filters {
   from: string; to: string; // inclusive local dates YYYY-MM-DD
@@ -48,7 +48,7 @@ export const COMPLETED_PHASES: Execution['phase'][] = ['PASSED', 'FAILED', 'ROLL
 export type MetricKey =
   | 'all' | 'autoClosed' | 'assistedClosed' | 'manualClosed' | 'review' | 'unsupported' | 'aiVerified' | 'eligible' | 'everResolved' | 'reopened'
   | 'b_closedAuto' | 'b_closedAssisted' | 'b_closedManual' | 'b_resolvedAwaiting' | 'b_decision' | 'b_waiting' | 'b_inProgress' | 'b_escalated' | 'b_other'
-  | 'f_executed' | 'f_verified' | 'f_closed';
+  | 'f_executed' | 'f_verified' | 'f_closed' | 'f_attempted' | 'verifiedAny' | 'sla_breached' | 'sla_at_risk' | 'sla_met' | 'sla_missed' | 'inProgress' | 'investigation';
 export const METRIC_DEFS: Record<MetricKey, { label: string; predicate: string; test: (t: Ticket, s: AppState) => boolean }> = {
   all: { label: 'All incidents', predicate: 'every ticket in the intake cohort', test: () => true },
   autoClosed: { label: 'Auto-closed', predicate: 'status = Closed AND path = Auto (policy)', test: (t) => t.status === 'CLOSED' && t.path === 'AUTO_POLICY' },
@@ -66,11 +66,19 @@ export const METRIC_DEFS: Record<MetricKey, { label: string; predicate: string; 
   b_resolvedAwaiting: { label: 'Resolved · awaiting closure', predicate: 'status = Resolved', test: (t) => t.status === 'RESOLVED' },
   b_decision: { label: 'Review / approval / consent', predicate: 'status ∈ {Review required, Awaiting approval, Awaiting consent}', test: (t) => ['REVIEW_REQUIRED', 'AWAITING_APPROVAL', 'AWAITING_CONSENT'].includes(t.status) },
   b_waiting: { label: 'Waiting / scheduled', predicate: 'status ∈ {Waiting for device, Scheduled, Ready}', test: (t) => ['WAITING_DEVICE', 'SCHEDULED', 'READY'].includes(t.status) },
-  b_inProgress: { label: 'In progress', predicate: 'status ∈ {Diagnosing, Executing, Verifying, Rollback available, Rolling back}', test: (t) => ['DIAGNOSING', 'EXECUTING', 'VERIFYING', 'ROLLBACK_AVAILABLE', 'ROLLING_BACK'].includes(t.status) },
+  b_inProgress: { label: 'In progress', predicate: 'status ∈ {Diagnosing, Executing, Awaiting step approval, Verifying, Rollback available, Rolling back}', test: (t) => ['DIAGNOSING', 'EXECUTING', 'STEP_APPROVAL', 'VERIFYING', 'ROLLBACK_AVAILABLE', 'ROLLING_BACK'].includes(t.status) },
   b_escalated: { label: 'Escalated', predicate: 'status = Escalated', test: (t) => t.status === 'ESCALATED' },
   b_other: { label: 'Other open / reopened', predicate: 'status ∈ {Open, Reopened}', test: (t) => t.status === 'OPEN' || t.status === 'REOPENED' },
   f_executed: { label: 'Executed', predicate: 'eligibleAtIntake AND has ≥ 1 completed execution', test: (t, s) => t.eligibleAtIntake && s.executions.some((e) => e.ticketId === t.id && COMPLETED_PHASES.includes(e.phase)) },
   f_verified: { label: 'Verified', predicate: 'eligibleAtIntake AND currently verified AI resolution', test: (t) => t.eligibleAtIntake && isVerifiedAIResolution(t) },
+  f_attempted: { label: 'Remediation attempted', predicate: 'eligibleAtIntake AND ≥ 1 execution started (not cancelled before start)', test: (t, s) => t.eligibleAtIntake && s.executions.some((e) => e.ticketId === t.id && e.phase !== 'CANCELLED') },
+  verifiedAny: { label: 'Verified resolutions', predicate: 'currently Resolved/Closed AND verified (any path)', test: (t) => (t.status === 'RESOLVED' || t.status === 'CLOSED') && t.verified },
+  sla_breached: { label: 'SLA breached', predicate: 'open AND now > SLA due time (as of now)', test: (t) => slaState(t, Date.now()) === 'BREACHED' },
+  sla_at_risk: { label: 'Approaching SLA breach', predicate: 'open AND due within min(1h, 25% of SLA window) (as of now)', test: (t) => slaState(t, Date.now()) === 'AT_RISK' },
+  sla_met: { label: 'Resolved within SLA', predicate: 'resolvedAt ≤ SLA due time', test: (t) => slaState(t, Date.now()) === 'MET' },
+  sla_missed: { label: 'SLA missed or breached', predicate: 'resolved after SLA due OR open past due', test: (t) => ['MISSED', 'BREACHED'].includes(slaState(t, Date.now())) },
+  inProgress: { label: 'AI remediation in progress', predicate: 'status ∈ {Ready, Scheduled, Executing, Verifying, Rolling back}', test: (t) => ['READY', 'EXECUTING', 'VERIFYING', 'SCHEDULED', 'ROLLING_BACK'].includes(t.status) },
+  investigation: { label: 'Human investigation required', predicate: 'status ∈ {Review required, Escalated, Rollback available}', test: (t) => ['REVIEW_REQUIRED', 'ESCALATED', 'ROLLBACK_AVAILABLE'].includes(t.status) },
   f_closed: { label: 'Closed', predicate: 'eligibleAtIntake AND verified AI resolution AND status Closed', test: (t) => t.eligibleAtIntake && isVerifiedAIResolution(t) && t.status === 'CLOSED' },
 };
 export const BUCKETS: MetricKey[] = ['b_closedAuto', 'b_closedAssisted', 'b_closedManual', 'b_resolvedAwaiting', 'b_decision', 'b_waiting', 'b_inProgress', 'b_escalated', 'b_other'];
@@ -86,10 +94,11 @@ export function kpis(s: AppState, f: Filters): Kpis {
   const eligible = c.filter((t) => t.eligibleAtIntake);
   const ns = eligible.filter(isVerifiedAIResolution);
   const ai = c.filter(isVerifiedAIResolution);
-  const sumB = ai.reduce((a, t) => a + t.baselineAgentMin, 0);
-  const saved = ai.reduce((a, t) => a + (t.baselineAgentMin - t.agentMin), 0);
-  const sumBR = ai.reduce((a, t) => a + t.baselineResolutionMin, 0);
-  const sumMR = ai.reduce((a, t) => a + (t.modeledResolutionMin ?? t.baselineResolutionMin), 0);
+  const base = s.settings.assumptions.baselines;
+  const sumB = ai.reduce((a, t) => a + base[t.category].agentMin, 0);
+  const saved = ai.reduce((a, t) => a + (base[t.category].agentMin - t.agentMin), 0);
+  const sumBR = ai.reduce((a, t) => a + base[t.category].resolutionMin, 0);
+  const sumMR = ai.reduce((a, t) => a + (t.modeledResolutionMin ?? base[t.category].resolutionMin), 0);
   const resolved = c.filter((t) => (t.status === 'RESOLVED' || t.status === 'CLOSED') && t.modeledResolutionMin !== undefined);
   const ever = c.filter((t) => t.firstResolvedAt);
   return {
@@ -148,15 +157,47 @@ export function statusBreakdown(s: AppState, f: Filters) {
   return BUCKETS.map((k) => ({ key: k, label: METRIC_DEFS[k].label, count: c.filter((t) => METRIC_DEFS[k].test(t, s)).length }));
 }
 
+/** Automation funnel (enhancement §9): nested subsets of one intake cohort and date range. */
 export function funnel(s: AppState, f: Filters) {
   const c = cohort(s, f);
+  const stage = (key: MetricKey) => c.filter((t) => METRIC_DEFS[key].test(t, s)).length;
   return [
-    { key: 'all' as MetricKey, label: 'Intake', count: c.length },
-    { key: 'eligible' as MetricKey, label: 'Eligible', count: c.filter((t) => t.eligibleAtIntake).length },
-    { key: 'f_executed' as MetricKey, label: 'Executed', count: c.filter((t) => METRIC_DEFS.f_executed.test(t, s)).length },
-    { key: 'f_verified' as MetricKey, label: 'Verified', count: c.filter((t) => METRIC_DEFS.f_verified.test(t, s)).length },
-    { key: 'f_closed' as MetricKey, label: 'Closed', count: c.filter((t) => METRIC_DEFS.f_closed.test(t, s)).length },
+    { key: 'all' as MetricKey, label: 'Reported incidents', count: c.length },
+    { key: 'eligible' as MetricKey, label: 'Eligible incidents', count: stage('eligible') },
+    { key: 'f_attempted' as MetricKey, label: 'Remediation attempted', count: stage('f_attempted') },
+    { key: 'f_verified' as MetricKey, label: 'Verified AI resolutions', count: stage('f_verified') },
   ];
+}
+
+/** Business impact estimates (enhancement §9). All values are ESTIMATES from configurable assumptions. */
+export function businessImpact(s: AppState, f: Filters) {
+  const c = cohort(s, f);
+  const a = s.settings.assumptions;
+  const ai = c.filter(isVerifiedAIResolution);
+  const agentMinSaved = ai.reduce((x, t) => x + (a.baselines[t.category].agentMin - t.agentMin), 0);
+  const downtimeMin = ai.reduce((x, t) => x + Math.max(0, a.baselines[t.category].resolutionMin - (t.modeledResolutionMin ?? a.baselines[t.category].resolutionMin)), 0);
+  const sumBR = ai.reduce((x, t) => x + a.baselines[t.category].resolutionMin, 0);
+  const sumMR = ai.reduce((x, t) => x + (t.modeledResolutionMin ?? 0), 0);
+  const now = Date.now();
+  const met = c.filter((t) => slaState(t, now) === 'MET').length;
+  const missed = c.filter((t) => ['MISSED', 'BREACHED'].includes(slaState(t, now))).length;
+  const eligible = c.filter((t) => t.eligibleAtIntake);
+  const ever = c.filter((t) => t.firstResolvedAt);
+  const ex = executionsInRange(s, f).filter((e) => e.phase !== 'CANCELLED' && e.phase !== 'AWAITING_STEP');
+  const disruptive = ex.filter((e) => s.runbooks.find((r) => r.id === e.runbookId && r.version === e.version)?.disruptive);
+  return {
+    aiResolutions: ai.length,
+    agentHoursSaved: ai.length ? agentMinSaved / 60 : null,
+    downtimeHoursAvoided: ai.length ? downtimeMin / 60 : null,
+    costSavings: ai.length ? (agentMinSaved / 60) * a.hourlyCost : null,
+    mttrImprovement: ratio(sumBR - sumMR, sumBR),
+    verifiedRate: ratio(eligible.filter(isVerifiedAIResolution).length, eligible.length),
+    slaCompliance: ratio(met, met + missed), slaMet: met, slaMissed: missed,
+    reopenRate: ratio(ever.filter((t) => t.reopenedCount > 0).length, ever.length),
+    disruptiveExecutions: disruptive.length,
+    disruptionMin: disruptive.reduce((x, e) => x + (s.runbooks.find((r) => r.id === e.runbookId && r.version === e.version)?.expectedMin ?? 0), 0),
+    disruptiveFailures: disruptive.filter((e) => ['FAILED', 'ROLLED_BACK', 'ROLLBACK_FAILED'].includes(e.phase)).length,
+  };
 }
 
 /** Resolved throughput uses current resolvedAt within range (activity basis). */
@@ -221,7 +262,7 @@ export function opportunities(s: AppState) {
     blockers.set(reason, [...(blockers.get(reason) ?? []), t]);
   }
   const list: Opportunity[] = [...gaps.entries()].map(([category, tickets]) => ({
-    category, tickets, hours: (tickets.length * Math.max(0, BASELINES[category].agentMin - 4)) / 60,
+    category, tickets, hours: (tickets.length * Math.max(0, s.settings.assumptions.baselines[category].agentMin - 4)) / 60,
     drafts: s.runbooks.filter((r) => r.category === category && !(r.status === 'APPROVED' && r.actionKey)).map((r) => ({ id: r.id, version: r.version, status: r.status })),
   })).sort((a, b) => b.hours - a.hours);
   const blockerList = [...blockers.entries()].map(([reason, tickets]) => ({ reason, tickets, hours: tickets.reduce((a, t) => a + Math.max(0, t.baselineAgentMin - 4), 0) / 60 })).sort((a, b) => b.tickets.length - a.tickets.length);

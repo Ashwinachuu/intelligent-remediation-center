@@ -32,7 +32,7 @@ export function PoliciesPage() {
     const rb = findRunbook(state.runbooks, sc.category);
     const device: Device = { ...HEALTHY_DEVICE, ...symptomFor(sc.category), ...sc.device, id: 's', name: 's', group: sample.group, online: sample.online && (sc.device.online ?? true), managed: sample.managed };
     const risk = rb ? (sample.group === 'Critical' && rb.disruptive ? 'HIGH' : rb.risk) : DEFAULT_SCORE[sc.category].risk;
-    return { sc, rb, r: evaluateRoute({ confidence: DEFAULT_SCORE[sc.category].score, risk, runbook: rb, device, policy: { ...draft, version: 0 }, approvalValid: false, consentValid: false, now: Date.now() }) };
+    return { sc, rb, r: evaluateRoute({ confidence: DEFAULT_SCORE[sc.category].score, risk, runbook: rb, device, policy: { ...draft, version: 0 }, approvalValid: false, consentValid: false, now: Date.now(), source: sc.source }) };
   }, [sample, draft, state.runbooks]);
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setDraft((d) => ({ ...d, [k]: v }));
   const num = (k: 'reviewThreshold' | 'approvalThreshold' | 'autoThreshold' | 'approvalTTLMin' | 'maxAttempts') => (
@@ -51,7 +51,7 @@ export function PoliciesPage() {
           <label className="switch"><input type="checkbox" role="switch" checked={!draft.enabled} disabled={!isAdmin} onChange={(e) => set('enabled', !e.target.checked)} aria-describedby="pause-hint" />Master pause (stop new automated starts)</label>
           <span id="pause-hint" className="small muted">Pause routes new/pending plans to review. In-flight actions stop before the next mutation; already-applied changes still verify and can roll back.</span>
           <label className="switch"><input type="checkbox" role="switch" data-testid="preapproval" checked={draft.autoEnabled} disabled={!isAdmin} onChange={(e) => { if (e.target.checked) setConfirmAuto(true); else set('autoEnabled', false); }} />Policy preapproval for LOW-risk catalog runbooks</label>
-          <span className="small muted">Only LOW-risk, non-disruptive, published runbooks marked preapproved with score ≥ auto threshold. MEDIUM/HIGH never auto-execute.</span>
+          <span className="small muted">Master switch for policy-based autonomy. Applies only to LOW-risk, non-disruptive runbooks at maturity L3 (employee-reported) or L4 (proactive detection), with score ≥ auto threshold. MEDIUM/HIGH never auto-execute; maturity is promoted per runbook in the Library.</span>
           <div className="grid grid-3">
             <label className="field">Review threshold{num('reviewThreshold')}</label>
             <label className="field">Approval threshold{num('approvalThreshold')}</label>
@@ -73,7 +73,7 @@ export function PoliciesPage() {
         <div className="stack-16">
           <section className="card" aria-label="Route matrix">
             <h2>Live route matrix</h2>
-            <p className="small muted">Computed by the same policy function with the settings on the left, for a healthy managed Standard device and a catalog runbook (LOW: preapproved, non-disruptive; MEDIUM/HIGH: disruptive), before any approval.</p>
+            <p className="small muted">Computed by the same policy function with the settings on the left, for a healthy managed Standard device, an employee-reported ticket and a catalog runbook (LOW: maturity L3, non-disruptive; MEDIUM/HIGH: L2, disruptive), before any approval.</p>
             <div className="table-wrap"><table className="data matrix"><thead><tr><th>Risk \ score</th>{MATRIX_SCORES.map((s) => <th key={s}>{s}</th>)}</tr></thead>
               <tbody>{matrix.map((row) => <tr key={row.risk}><th scope="row">{row.risk}</th>{row.cells.map((c) => <td key={c.score} title={c.reason}>{STATUS_LABEL[c.route]}</td>)}</tr>)}</tbody></table></div>
           </section>
@@ -97,7 +97,7 @@ export function PoliciesPage() {
       </div>
       {confirmAuto && (
         <Modal title="Enable policy preapproval?" onClose={() => setConfirmAuto(false)} footer={<><button className="btn" onClick={() => setConfirmAuto(false)}>Cancel</button><button className="btn btn-primary" data-testid="confirm-preapproval" onClick={() => { set('autoEnabled', true); setConfirmAuto(false); }}>Enable preapproval</button></>}>
-          <p>With preapproval, eligible LOW-risk plans (score ≥ {draft.autoThreshold}, runbook published and marked preapproved, non-disruptive, managed Standard device) execute <strong>without a per-ticket approval</strong>. Authorization is recorded as this policy version.</p>
+          <p>With preapproval, eligible LOW-risk plans (score ≥ {draft.autoThreshold}, runbook at maturity L3 — or L4 for proactive detections — non-disruptive, managed Standard device) execute <strong>without a per-ticket approval</strong>. Authorization is recorded as this policy version.</p>
           <p className="muted">MEDIUM and HIGH risk always require explicit approval. You still need to save the new policy version with a reason.</p>
         </Modal>
       )}

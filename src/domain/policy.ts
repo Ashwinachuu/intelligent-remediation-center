@@ -22,10 +22,39 @@ export function validatePolicy(p: Policy): string[] {
 export interface GateContext {
   confidence: number; risk: Risk; runbook?: Runbook; device: Device; policy: Policy;
   approvalValid: boolean; consentValid: boolean; scheduleDueAt?: string; now: number;
+  /** Ticket source — proactive (DETECTION) autonomy needs maturity L4. */
+  source?: 'EMPLOYEE' | 'DETECTION';
+  /** Set when the ticket is linked to an open shared (parent) incident. */
+  holdReason?: string;
+}
+
+/** Runbook maturity gate for policy-based autonomy (enhancement §10). Safety constraints still apply at every level. */
+export function maturityAllowsAuto(rb: Runbook, source: 'EMPLOYEE' | 'DETECTION' = 'EMPLOYEE'): { ok: boolean; why?: string } {
+  if (rb.maturity < 3) return { ok: false, why: `${rb.id} maturity L${rb.maturity} (policy-based execution needs L3)` };
+  if (source === 'DETECTION' && rb.maturity < 4) return { ok: false, why: `proactive detection needs L4; ${rb.id} is L${rb.maturity}` };
+  return { ok: true };
+}
+
+const BATTERY_MIN = 30;
+const STORAGE_MIN: Partial<Record<string, number>> = { OS_UPDATE: 10, APP_UPDATE: 2 };
+/** Battery / storage prerequisites (enhancement §3). Shared by the gate and the preflight panel. */
+export function resourceChecks(d: Device, rb?: Runbook) {
+  const needsBattery = !!rb && (rb.disruptive || rb.restartRequired);
+  const minGB = rb?.actionKey ? STORAGE_MIN[rb.actionKey] : undefined;
+  return {
+    battery: !needsBattery ? { applicable: false, ok: true, detail: 'Not required for this action' } : { applicable: true, ok: d.batteryPct >= BATTERY_MIN, detail: `Battery ${d.batteryPct}% (minimum ${BATTERY_MIN}% or on AC power)` },
+    storage: minGB === undefined ? { applicable: false, ok: true, detail: 'No additional storage needed' } : { applicable: true, ok: d.freeGB >= minGB, detail: `Free disk ${d.freeGB} GB (needs ≥ ${minGB} GB)` },
+  };
+}
+export function recoveryCheck(rb: Runbook | undefined, risk: Risk) {
+  if (!rb) return { applicable: false, ok: true, detail: 'No runbook' };
+  if (rb.reversible) return { applicable: true, ok: true, detail: `Rollback available for 30 min: ${rb.rollbackSteps.join('; ')}` };
+  if (risk === 'HIGH') return { applicable: true, ok: false, detail: 'HIGH-risk action without a rollback path is not permitted' };
+  return { applicable: true, ok: true, detail: `Irreversible by design, declared safe: ${rb.recoveryNote}` };
 }
 export interface GateResult {
   route: Status; path?: Path; reasons: string[]; requiredRole: Role | null; needsConsent: boolean;
-  needsSchedule: boolean; autoEligible: boolean; hardBlock: boolean; blocker?: 'UNMANAGED' | 'GROUP' | 'OS' | 'NO_RUNBOOK' | 'CONFIDENCE' | 'PAUSED' | 'OFFLINE' | 'BUSY';
+  needsSchedule: boolean; autoEligible: boolean; hardBlock: boolean; blocker?: 'UNMANAGED' | 'GROUP' | 'OS' | 'NO_RUNBOOK' | 'CONFIDENCE' | 'PAUSED' | 'OFFLINE' | 'BUSY' | 'HOLD' | 'RESOURCES' | 'RECOVERY';
 }
 
 /**
@@ -52,18 +81,20 @@ export function evaluateRoute(c: GateContext): GateResult {
   if (c.confidence < p.reviewThreshold) return out('ESCALATED', [`Score ${c.confidence} < review threshold ${p.reviewThreshold}`], { blocker: 'CONFIDENCE', requiredRole: null });
   if (c.confidence < p.approvalThreshold) return out('REVIEW_REQUIRED', [`Score ${c.confidence} < approval threshold ${p.approvalThreshold} — human review`], { blocker: 'CONFIDENCE', requiredRole: null });
   // 3. Pause / availability.
+  if (c.holdReason) return out('REVIEW_REQUIRED', [c.holdReason], { blocker: 'HOLD' });
   if (!p.enabled) return out('REVIEW_REQUIRED', ['Automation paused by policy — manual handling allowed'], { blocker: 'PAUSED' });
   if (!d.online) return out('WAITING_DEVICE', ['Management channel unreachable — device offline'], { blocker: 'OFFLINE' });
   // 4. Authorization.
-  const autoEligible = p.autoEnabled && c.risk === 'LOW' && c.confidence >= p.autoThreshold && rb.preapproved && !rb.disruptive;
+  const mat = maturityAllowsAuto(rb, c.source);
+  const autoEligible = p.autoEnabled && c.risk === 'LOW' && c.confidence >= p.autoThreshold && mat.ok && !rb.disruptive;
   const reasons: string[] = [];
-  if (autoEligible) reasons.push(`Preapproved by policy v${p.version}: LOW risk, score ${c.confidence} ≥ ${p.autoThreshold}, ${rb.id} preapproved, non-disruptive`);
+  if (autoEligible) reasons.push(`Preapproved by policy v${p.version}: LOW risk, score ${c.confidence} ≥ ${p.autoThreshold}, ${rb.id} at maturity L${rb.maturity}, non-disruptive`);
   else {
     const why: string[] = [];
     if (!p.autoEnabled) why.push('policy preapproval is off');
     if (c.risk !== 'LOW') why.push(`${c.risk} risk is never auto-executed`);
     else if (c.confidence < p.autoThreshold) why.push(`score ${c.confidence} < auto threshold ${p.autoThreshold}`);
-    if (!rb.preapproved) why.push(`${rb.id} not marked preapproved`);
+    if (!mat.ok) why.push(mat.why!);
     if (rb.disruptive) why.push('action is disruptive');
     reasons.push(`Explicit ${c.risk === 'HIGH' ? 'admin' : 'agent'} approval required (${why.join('; ')})`);
   }
@@ -72,6 +103,10 @@ export function evaluateRoute(c: GateContext): GateResult {
   // 5. Consent / busy / schedule.
   if (rb.disruptive && !c.consentValid) return out('AWAITING_CONSENT', [...reasons, d.busy ? 'Employee busy — disruptive action needs fresh employee consent' : 'Disruptive action — employee consent required'], { autoEligible });
   if (d.busy) return out('WAITING_DEVICE', [...reasons, 'Employee/device busy — execution deferred'], { autoEligible, blocker: 'BUSY' });
+  const res = resourceChecks(d, rb);
+  if (!res.battery.ok || !res.storage.ok) return out('WAITING_DEVICE', [...reasons, `Preflight prerequisite not met: ${[!res.battery.ok && res.battery.detail, !res.storage.ok && res.storage.detail].filter(Boolean).join('; ')}`], { autoEligible, blocker: 'RESOURCES' });
+  const rec = recoveryCheck(rb, c.risk);
+  if (!rec.ok) return out('REVIEW_REQUIRED', [...reasons, rec.detail], { autoEligible, blocker: 'RECOVERY' });
   if (c.risk === 'HIGH' && !c.scheduleDueAt) return out('AWAITING_APPROVAL', [...reasons, 'High-risk action requires a scheduled maintenance window'], { autoEligible });
   if (c.scheduleDueAt && Date.parse(c.scheduleDueAt) > c.now) return out('SCHEDULED', [...reasons, `Scheduled for ${c.scheduleDueAt}`], { autoEligible });
   return out('READY', [...reasons, 'All gates satisfied'], { autoEligible, path: c.approvalValid ? 'HUMAN_APPROVED' : 'AUTO_POLICY' });
@@ -92,9 +127,10 @@ export function routeMatrix(policy: Policy, device: Device) {
     cells: scores.map((score) => {
       const rb: Runbook = {
         id: 'RB-SAMPLE', version: 1, title: 'Sample', category: 'STORAGE', status: 'APPROVED', risk, supportedOS: ['Windows 11'], steps: [], checks: [], rollbackSteps: [],
-        reversible: true, disruptive: risk !== 'LOW', expectedMin: 5, owner: '', preapproved: risk === 'LOW', diagnosticOnly: false, prerequisites: [], recoveryNote: '', sourceTicketIds: [], createdAt: '', actionKey: 'STORAGE',
+        reversible: true, disruptive: risk !== 'LOW', expectedMin: 5, owner: '', maturity: risk === 'LOW' ? 3 : 2, diagnosticOnly: false, prerequisites: [], recoveryNote: '', sourceTicketIds: [], createdAt: '', actionKey: 'STORAGE',
+        stepDefs: [], maturityHistory: [], restartRequired: false,
       };
-      const r = evaluateRoute({ confidence: score, risk, runbook: rb, device, policy, approvalValid: false, consentValid: false, now: 0 });
+      const r = evaluateRoute({ confidence: score, risk, runbook: rb, device, policy, approvalValid: false, consentValid: false, now: 0, source: 'EMPLOYEE' });
       return { score, route: r.route, reason: r.reasons[0] };
     }),
   }));

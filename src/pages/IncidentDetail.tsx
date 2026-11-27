@@ -1,9 +1,12 @@
-import { useMemo, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
-import { AlertTriangle, CalendarClock, CheckCircle2, CircleHelp, ClipboardCheck, FilePlus2, Info, Play, RotateCcw, ShieldAlert, Undo2, UserCheck, UserX, Wifi, WifiOff, XCircle, Clock, OctagonAlert, Search, Hourglass } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { AlertTriangle, CalendarClock, CheckCircle2, CircleHelp, ClipboardCheck, FilePlus2, Info, Play, RotateCcw, ShieldAlert, Undo2, UserCheck, Wifi, WifiOff, XCircle, Clock, OctagonAlert, Search, Hourglass } from 'lucide-react';
 import { useStore } from '../app/store';
 import { CATEGORY_LABEL, EVIDENCE_KINDS, SIM_ACTIONS } from '../domain/catalog';
-import { activeExecution, attemptsForRevision, currentDiagnosis, deviceFieldLabel, gatesFor, latestAppliedExecution } from '../domain/engine';
+import { activeExecution, attemptsForRevision, currentDiagnosis, deviceFieldLabel, gatesFor, latestAppliedExecution, pausedExecution, runbookOf, validStepApproval } from '../domain/engine';
+import { preflight } from '../domain/preflight';
+import { AssessmentPanel, CorrelationPanel, EmployeeConsentCard, PreflightPanel, SimilarIncidentsPanel, SlaBadge } from '../components/Insights';
+import { Battery, BatteryLow } from 'lucide-react';
 import { canRoleApprove } from '../domain/policy';
 import { ESCALATABLE, STATUS_LABEL } from '../domain/transitions';
 import type { AppState, Device, EvidenceKind, Execution, Role, Ticket } from '../domain/types';
@@ -47,24 +50,43 @@ function ScoreMeter({ score, review, approval, auto }: { score: number; review: 
   );
 }
 
-function ExecutionView({ e, s }: { e: Execution; s: AppState }) {
-  const rb = s.runbooks.find((r) => r.id === e.runbookId && r.version === e.version);
-  const steps = [...(rb?.steps ?? []), 'Verification checks'];
-  const failed = e.phase === 'FAILED' || e.phase === 'ROLLBACK_FAILED';
-  const stateOf = (i: number) => {
-    if (e.phase === 'CANCELLED') return i < e.stepIndex ? 'done' : i === e.stepIndex ? 'fail' : '';
-    if (i < 3) { if (i < e.stepIndex) return 'done'; if (i === e.stepIndex && e.phase === 'RUNNING') return 'active'; if (e.outcome === 'EXEC_FAIL' && i === 0 && failed) return 'fail'; return e.stepIndex > i ? 'done' : ''; }
-    if (e.phase === 'VERIFYING') return 'active';
-    if (e.verificationOutput.length) return e.verificationPassed ? 'done' : 'fail';
-    return '';
+const STEP_TYPE: Record<string, string> = { DIAGNOSTIC: 'Read-only diagnostic', SNAPSHOT: 'Snapshot (read-only)', ACTION: 'Device change' };
+const APPROVAL_TEXT: Record<string, string> = { NONE: 'Auto (read-only)', PLAN: 'Covered by plan authorization', STEP: 'Explicit step approval' };
+function ExecutionView({ e, s, now }: { e: Execution; s: AppState; now: number }) {
+  const rb = runbookOf(s, e);
+  const defs = rb?.stepDefs ?? [];
+  const sa = validStepApproval(s, e, now);
+  const stateOf = (i: number): { cls: string; text: string } => {
+    if (e.results[i]) return e.results[i].includes('FAILED') || e.results[i].includes('stopped before mutation') ? { cls: 'fail', text: e.phase === 'CANCELLED' ? 'Stopped' : 'Failed' } : { cls: 'done', text: 'Completed' };
+    if (i === e.stepIndex) {
+      if (e.phase === 'AWAITING_STEP') return { cls: 'pause', text: 'Awaiting step approval' };
+      if (e.phase === 'RUNNING') return e.stepScheduledFor && Date.parse(e.stepScheduledFor) > now ? { cls: 'pause', text: `Scheduled ${fmtTime(e.stepScheduledFor)}` } : { cls: 'active', text: 'Running…' };
+      if (e.phase === 'CANCELLED') return { cls: 'fail', text: 'Cancelled — not executed' };
+    }
+    return { cls: '', text: e.phase === 'CANCELLED' || e.phase === 'FAILED' ? 'Not executed' : 'Pending' };
   };
+  const verifying = e.phase === 'VERIFYING';
   return (
     <div className="stack">
-      <div className="row-between"><strong>Execution {e.id.slice(0, 8)} · {e.runbookId} v{e.version}</strong><span className="badge b-neutral">{e.phase.replace(/_/g, ' ').toLowerCase()}</span></div>
-      <div className="small muted">Started {fmtTime(e.startedAt)}{e.endedAt && ` · ended ${fmtTime(e.endedAt)} (actual elapsed ${Math.max(0, Math.round((ms(e.endedAt) - ms(e.startedAt)) / 1000))}s — accelerated demo)`} · authorization: {e.authorization.kind === 'APPROVAL' ? `approval by ${e.authorization.actor} (${e.authorization.role})` : `policy v${e.authorization.policyVersion} preapproval`}</div>
-      <ol className="steps" aria-label="Execution steps">
-        {steps.map((st, i) => { const k = stateOf(i); return <li key={i}><span className={`step-dot ${k}`} aria-hidden>{k === 'done' ? '✓' : k === 'fail' ? '!' : i + 1}</span><div><div>{st}</div><div className="small muted">{e.results[i] ?? (k === 'active' ? 'In progress…' : 'Pending')}</div></div></li>; })}
-      </ol>
+      <div className="row-between"><strong>Execution {e.id.slice(0, 8)} · {e.runbookId} v{e.version}</strong><span className="badge b-neutral">{e.phase === 'AWAITING_STEP' ? 'paused at step' : e.phase.replace(/_/g, ' ').toLowerCase()}</span></div>
+      <div className="small muted">Started {fmtTime(e.startedAt)}{e.endedAt && ` · ended ${fmtTime(e.endedAt)} (actual elapsed ${Math.max(0, Math.round((ms(e.endedAt) - ms(e.startedAt)) / 1000))}s — accelerated demo)`} · authorization: {e.authorization.kind === 'APPROVAL' ? `approval by ${e.authorization.actor} (${e.authorization.role})` : `policy v${e.authorization.policyVersion} preapproval`} · <strong>simulated</strong> — no real device command</div>
+      <div className="table-wrap"><table className="data steps-table" aria-label="Execution steps">
+        <thead><tr><th>Step</th><th>Type · risk</th><th>Approval</th><th>Depends on</th><th>Status</th><th>Expected result / verification</th><th>Recovery</th></tr></thead>
+        <tbody>
+          {defs.map((d, i) => { const k = stateOf(i); return (
+            <tr key={d.id} data-step={d.id} data-step-status={k.cls}>
+              <td><span className={`step-dot ${k.cls === 'pause' ? 'active' : k.cls}`} aria-hidden>{k.cls === 'done' ? '✓' : k.cls === 'fail' ? '!' : i + 1}</span> <strong>{d.id}</strong> {d.description}{e.results[i] && <div className="small muted">{e.results[i]}</div>}</td>
+              <td>{STEP_TYPE[d.type]} · <RiskBadge risk={d.risk} /></td>
+              <td className="small">{APPROVAL_TEXT[d.approval]}{d.approval === 'STEP' && sa && i === e.stepIndex ? ` — approved by ${sa.actor}` : ''}</td>
+              <td className="small">{d.dependsOn.join(', ') || '—'}</td>
+              <td><span className={`badge ${k.cls === 'done' ? 'b-success' : k.cls === 'fail' ? 'b-danger' : k.cls === 'pause' ? 'b-warning' : k.cls === 'active' ? 'b-accent' : 'b-outline'}`}>{k.text}</span></td>
+              <td className="small">{d.expectedResult}<div className="muted">Check: {d.verification}</div></td>
+              <td className="small">{d.recoverable ? 'Recoverable' : 'Not reversible'}</td>
+            </tr>); })}
+          <tr><td><span className={`step-dot ${verifying ? 'active' : e.verificationOutput.length ? (e.verificationPassed ? 'done' : 'fail') : ''}`} aria-hidden>{e.verificationOutput.length ? (e.verificationPassed ? '✓' : '!') : defs.length + 1}</span> <strong>V</strong> Verification checks</td><td>Independent phase</td><td className="small">Auto</td><td className="small">{defs.map((d) => d.id).join(', ')}</td>
+            <td><span className={`badge ${verifying ? 'b-accent' : e.verificationOutput.length ? (e.verificationPassed ? 'b-success' : 'b-danger') : 'b-outline'}`}>{verifying ? 'Running…' : e.verificationOutput.length ? (e.verificationPassed ? 'Passed' : 'Failed') : 'Pending'}</span></td><td className="small">{rb?.checks.join('; ')}</td><td className="small">—</td></tr>
+        </tbody></table></div>
+      {e.preflight.length > 0 && <details className="disclosure"><summary>Preflight results recorded at start ({e.preflight.filter((c) => c.status === 'PASS').length} passed, {e.preflight.filter((c) => c.status === 'NA').length} n/a)</summary><PreflightPanel checks={e.preflight} title="Preflight at execution start" note="Snapshot recorded in the audit log when execution started." /></details>}
       {e.changes.length > 0 && (
         <table className="data change-table"><thead><tr><th>Field</th><th>Before (snapshot)</th><th>After action</th><th>Current</th></tr></thead>
           <tbody>{e.changes.map((c) => <tr key={c.field}><td>{deviceFieldLabel(c.field)}</td><td className="diff-before">{String(c.before)}</td><td className="diff-after">{String(c.after)}</td><td>{String(s.devices[e.deviceId][c.field])}</td></tr>)}</tbody></table>
@@ -84,7 +106,27 @@ export function IncidentDetailPage() {
   const dispatch = useStore((s) => s.dispatch);
   const nav = useNavigate();
   const [tab, setTab] = useState<Tab>('remediation');
-  const [modal, setModal] = useState<null | { kind: 'REJECT' | 'REQUEST_REVIEW' | 'ESCALATE' | 'REOPEN' | 'REOPEN_EMP' } | { kind: 'SCHEDULE' } | { kind: 'MANUAL' }>(null);
+  const [modal, setModal] = useState<null | { kind: 'REJECT' | 'REQUEST_REVIEW' | 'ESCALATE' | 'REOPEN' | 'REOPEN_EMP' | 'REJECT_STEP' } | { kind: 'SCHEDULE' } | { kind: 'MANUAL' } | { kind: 'STEP' }>(null);
+  const [sp, setSp] = useSearchParams();
+  const focus = sp.get('focus');
+  const [pendingFocus, setPendingFocus] = useState(false);
+  useEffect(() => {
+    if (focus !== 'action') return;
+    // Consume the deep-link parameter synchronously (no delayed URL writes that could race a later navigation).
+    setTab('remediation');
+    setPendingFocus(true);
+    setSp((p) => { const n = new URLSearchParams(p); n.delete('focus'); return n; }, { replace: true });
+  }, [focus, setSp]);
+  useEffect(() => {
+    if (!pendingFocus) return;
+    const h = setTimeout(() => {
+      const el = document.getElementById('action-card');
+      el?.scrollIntoView?.({ block: 'start' });
+      (el?.querySelector<HTMLElement>('[data-primary]:not([disabled])') ?? el)?.focus?.();
+      setPendingFocus(false);
+    }, 30);
+    return () => clearTimeout(h);
+  }, [pendingFocus]);
   const [reason, setReason] = useState('');
   const [schedAt, setSchedAt] = useState('');
   const [impactOk, setImpactOk] = useState(false);
@@ -116,7 +158,12 @@ export function IncidentDetailPage() {
   const attempts = d ? attemptsForRevision(state, t.id, d.revision) : 0;
 
   const run = (a: Parameters<typeof dispatch>[0]) => { if (submitting) return; setSubmitting(true); try { return dispatch(a); } finally { setTimeout(() => setSubmitting(false), 250); } };
-  const openReason = (kind: 'REJECT' | 'REQUEST_REVIEW' | 'ESCALATE' | 'REOPEN' | 'REOPEN_EMP') => { setReason(''); setModal({ kind }); };
+  const openReason = (kind: 'REJECT' | 'REQUEST_REVIEW' | 'ESCALATE' | 'REOPEN' | 'REOPEN_EMP' | 'REJECT_STEP') => { setReason(''); setModal({ kind }); };
+  const paused = pausedExecution(state, t.id);
+  const pausedStep = paused ? runbookOf(state, paused)?.stepDefs[paused.stepIndex] : undefined;
+  const pf = preflight(state, t.id, now, { execution: paused ?? (running && running.phase !== 'ROLLING_BACK' ? running : undefined), viewerRole: role });
+  const stepPerm = pausedStep ? canRoleApprove(role, pausedStep.risk) : { ok: false };
+  const stepBlocking = pf.blocking.filter((c) => c.key !== 'auth' && c.key !== 'window');
   const approveNow = () => run({ type: 'APPROVE', ticketId: t.id });
   const openSchedule = () => { setSchedAt(toLocalInput(now + 10 * MIN)); setImpactOk(false); setModal({ kind: 'SCHEDULE' }); };
 
@@ -133,7 +180,7 @@ export function IncidentDetailPage() {
         return (
           <div className="stack">
             <div className="row">
-              <button className="btn btn-primary" data-testid="approve" disabled={!!approveDisabled || submitting} onClick={d?.risk === 'HIGH' ? openSchedule : approveNow}>{d?.risk === 'HIGH' ? <CalendarClock size={16} aria-hidden /> : <CheckCircle2 size={16} aria-hidden />}{approveLabel}</button>
+              <button className="btn btn-primary" data-primary data-testid="approve" disabled={!!approveDisabled || submitting} onClick={d?.risk === 'HIGH' ? openSchedule : approveNow}>{d?.risk === 'HIGH' ? <CalendarClock size={16} aria-hidden /> : <CheckCircle2 size={16} aria-hidden />}{approveLabel}</button>
               {d?.risk !== 'HIGH' && <button className="btn" disabled={!!approveDisabled || submitting} onClick={openSchedule}><CalendarClock size={16} aria-hidden />Approve &amp; schedule</button>}
             </div>
             <DisabledReason reason={approveDisabled} />
@@ -141,7 +188,18 @@ export function IncidentDetailPage() {
           </div>
         );
       case 'AWAITING_CONSENT':
-        return <div className="banner warn" style={{ margin: 0 }}><UserCheck size={16} aria-hidden /><div>Waiting for employee consent. Consent is never inferred from agent approval. Use the labelled simulation buttons below.</div></div>;
+        return <div className="stack"><div className="banner warn" style={{ margin: 0 }}><UserCheck size={16} aria-hidden /><div>Waiting for employee consent{t.employeeResponse ? ` (last response: ${t.employeeResponse.choice.toLowerCase()})` : ''}. Consent is never inferred from agent approval.</div></div><EmployeeConsentCard ticketId={t.id} /></div>;
+      case 'STEP_APPROVAL':
+        return (
+          <div className="stack">
+            <div className="banner warn" style={{ margin: 0 }}><Hourglass size={16} aria-hidden /><div>Paused before <strong>{pausedStep?.id} · {pausedStep?.description}</strong> ({pausedStep?.risk} risk). Read-only steps ran automatically; no device change has been made yet. This approval is scoped to {t.displayId}, {dev.name}, action {rb?.actionKey}, {rb?.id} v{rb?.version}.</div></div>
+            <div className="row">
+              <button className="btn btn-primary" data-primary data-testid="approve-step" disabled={ro || !stepPerm.ok || stepBlocking.length > 0 || submitting} onClick={() => { setSchedAt(''); setImpactOk(false); setModal({ kind: 'STEP' }); }}><CheckCircle2 size={16} aria-hidden />Approve step…</button>
+              <button className="btn btn-danger" disabled={ro} onClick={() => openReason('REJECT_STEP')}>Reject step</button>
+            </div>
+            <DisabledReason reason={ro ? 'Manager role is read-only' : !stepPerm.ok ? `Step ${pausedStep?.id} is ${pausedStep?.risk} risk — requires an Admin step approver` : stepBlocking.length ? `Preflight blocks this step: ${stepBlocking.map((c) => c.label).join(', ')}` : null} />
+          </div>
+        );
       case 'WAITING_DEVICE':
         return <div className="banner" style={{ margin: 0 }}><WifiOff size={16} aria-hidden /><div>{g.reasons[g.reasons.length - 1]}. Use the simulation controls to reconnect or mark the employee available — all gates are re-evaluated.</div></div>;
       case 'SCHEDULED':
@@ -151,6 +209,7 @@ export function IncidentDetailPage() {
       case 'READY':
         return <div className="stack"><div className="banner success" style={{ margin: 0 }}><Play size={16} aria-hidden />All gates satisfied — starting automatically…</div><button className="btn" disabled={ro || submitting} onClick={() => run({ type: 'START', ticketId: t.id })}><Play size={16} aria-hidden />Start now</button></div>;
       case 'EXECUTING': case 'VERIFYING': case 'ROLLING_BACK':
+        if (paused && paused.stepScheduledFor && Date.parse(paused.stepScheduledFor) > now) return <div className="stack"><div className="banner" style={{ margin: 0 }}><CalendarClock size={16} aria-hidden /><div>Step {runbookOf(state, paused)?.stepDefs[paused.stepIndex]?.id} approved and scheduled for <strong>{fmtTime(paused.stepScheduledFor)}</strong>. Preflight is re-validated before it runs.</div></div><button className="btn btn-primary" data-primary data-testid="advance-step" disabled={ro || submitting} onClick={() => run({ type: 'ADVANCE_STEP', ticketId: t.id })}><Clock size={16} aria-hidden />Advance scheduled step to now (demo)</button></div>;
         return <div className="banner" style={{ margin: 0 }}><Hourglass size={16} aria-hidden /><div>{t.status === 'ROLLING_BACK' ? 'Rollback in progress' : 'Remediation in progress'} — no unsafe cancellation mid-action. Policy pause stops before the next mutation only.</div></div>;
       case 'ROLLBACK_AVAILABLE':
         return <div className="stack"><div className="banner danger" style={{ margin: 0 }}><XCircle size={16} aria-hidden /><div>Verification failed — the ticket is <strong>not</strong> resolved. Roll back the applied change, then follow up manually.</div></div>
@@ -172,7 +231,7 @@ export function IncidentDetailPage() {
       <section className="detail-head" aria-label="Ticket header">
         <div className="row-between">
           <div className="row"><h1>{t.displayId}</h1><StatusBadge status={t.status} />{t.demo && <span className="badge b-accent">Demo scenario{t.scenario && t.scenario !== 'CUSTOM' ? ` ${t.scenario}` : ''}</span>}</div>
-          <div className="row"><PathBadge path={t.path} /><RiskBadge risk={d?.risk} /></div>
+          <div className="row"><SlaBadge t={t} now={now} /><PathBadge path={t.path} /><RiskBadge risk={d?.risk} /></div>
         </div>
         <p style={{ marginTop: 6, fontSize: 15 }}>{t.title}</p>
         <dl className="meta-grid">
@@ -212,16 +271,14 @@ export function IncidentDetailPage() {
 
       {tab === 'remediation' && (
         <div role="tabpanel" id="panel-remediation" aria-labelledby="tab-remediation" className="split">
+          <div style={{ gridColumn: '1 / -1' }}><CorrelationPanel ticketId={t.id} /></div>
           <section className="card stack" aria-label="Evidence">
-            <h2>Diagnosis &amp; evidence {d && <span className="badge b-outline">Revision {d.revision}</span>}</h2>
-            {!d ? <p className="muted">Not diagnosed yet.</p> : (
+            <h2>AI assessment {d && <span className="badge b-outline">Revision {d.revision}</span>}</h2>
+            {!d ? <p className="muted">{t.isParent ? 'Shared incident — no endpoint diagnosis. Investigate the network segment and resolve manually.' : 'Not diagnosed yet.'}</p> : (
               <>
                 <div className="row"><span className="badge b-neutral">{CATEGORY_LABEL[d.category]}</span>{!d.telemetryConsistent && <span className="badge b-warning"><AlertTriangle size={12} aria-hidden />Telemetry mismatch — validation requested</span>}</div>
                 <ScoreMeter score={d.confidence} review={state.policy.reviewThreshold} approval={state.policy.approvalThreshold} auto={state.policy.autoThreshold} />
-                <h3>Evidence (from current telemetry)</h3>
-                <ul className="clean">{d.evidence.map((x, i) => <li key={i}><CheckCircle2 size={14} color="var(--success)" aria-hidden />{x}</li>)}</ul>
-                <h3>Uncertainty</h3>
-                <ul className="clean">{d.uncertainty.map((x, i) => <li key={i}><CircleHelp size={14} color="var(--warning)" aria-hidden />{x}</li>)}</ul>
+                <AssessmentPanel ticketId={t.id} />
                 <h3>Policy route</h3>
                 <ul className="clean">{g.reasons.map((x, i) => <li key={i}><ShieldAlert size={14} aria-hidden />{x}</li>)}</ul>
               </>
@@ -239,7 +296,7 @@ export function IncidentDetailPage() {
             )}
           </section>
 
-          <section className="card action-card stack" aria-label="Recommended action">
+          <section className="card action-card stack" aria-label="Recommended action" id="action-card" tabIndex={-1}>
             <h2>Recommended plan</h2>
             {rb ? (
               <dl className="kv">
@@ -254,6 +311,7 @@ export function IncidentDetailPage() {
                 <dt>Attempts</dt><dd>{attempts} of {state.policy.maxAttempts} for revision {d?.revision}</dd>
               </dl>
             ) : <p className="muted">No approved executable runbook for {CATEGORY_LABEL[d?.category ?? t.category]}. No device action will be executed.</p>}
+            {rb && !['RESOLVED', 'CLOSED', 'ESCALATED', 'ROLLBACK_AVAILABLE', 'ROLLING_BACK', 'VERIFYING'].includes(t.status) && <PreflightPanel checks={pf.checks} title={paused ? 'Preflight before the next step' : 'Preflight safety checks'} />}
             <div className="stack" style={{ borderTop: '1px solid var(--border)', paddingTop: 12 }}>{primary}</div>
             <div className="row">
               {t.status === 'AWAITING_APPROVAL' && <><button className="btn" disabled={ro} onClick={() => openReason('REQUEST_REVIEW')}>Request review</button><button className="btn btn-danger" disabled={ro} onClick={() => openReason('REJECT')}>Reject</button></>}
@@ -268,20 +326,21 @@ export function IncidentDetailPage() {
               <div className="row">
                 <button className="btn btn-sm" disabled={ro} onClick={() => run({ type: 'SET_DEVICE', ticketId: t.id, online: !dev.online })}>{dev.online ? <><WifiOff size={14} aria-hidden />Take device offline</> : <><Wifi size={14} aria-hidden />Simulate device reconnect</>}</button>
                 <button className="btn btn-sm" disabled={ro} onClick={() => run({ type: 'SET_DEVICE', ticketId: t.id, busy: !dev.busy })}>{dev.busy ? 'Mark employee available' : 'Mark employee busy'}</button>
+                <button className="btn btn-sm" data-testid="battery-toggle" disabled={ro} onClick={() => run({ type: 'SET_DEVICE', ticketId: t.id, batteryPct: dev.batteryPct < 30 ? 85 : 12 })}>{dev.batteryPct < 30 ? <><Battery size={14} aria-hidden />Plug in charger (85%)</> : <><BatteryLow size={14} aria-hidden />Drain battery (12%)</>}</button>
               </div>
-              {t.status === 'AWAITING_CONSENT' && <div className="row"><button className="btn btn-sm" data-testid="consent-grant" disabled={ro || submitting} onClick={() => run({ type: 'CONSENT', ticketId: t.id, grant: true })}><UserCheck size={14} aria-hidden />Simulate employee: grant consent</button><button className="btn btn-sm btn-danger" disabled={ro || submitting} onClick={() => run({ type: 'CONSENT', ticketId: t.id, grant: false })}><UserX size={14} aria-hidden />Simulate employee: deny consent</button></div>}
               {t.status === 'RESOLVED' && state.policy.closureMode === 'EMPLOYEE_CONFIRM' && <div className="row"><button className="btn btn-sm" disabled={ro} onClick={() => run({ type: 'EMPLOYEE_CONFIRM', ticketId: t.id })}>Simulate employee: confirm fixed</button><button className="btn btn-sm" disabled={ro} onClick={() => openReason('REOPEN_EMP')}>Simulate employee: still broken</button></div>}
               {t.status === 'CLOSED' && <div className="row"><button className="btn btn-sm" disabled={ro} onClick={() => openReason('REOPEN_EMP')}>Simulate employee: issue recurred</button></div>}
-              <p className="small muted">Toggles change only this fictional device and re-evaluate gates; they never bypass approval, consent or pause.</p>
+              <p className="small muted">Battery {dev.batteryPct}% · network {dev.networkId} · {dev.location}. Toggles change only this fictional device and re-evaluate gates; they never bypass approval, consent or pause.</p>
             </div>
           </section>
 
           {executions.length > 0 && (
             <section className="card stack" style={{ gridColumn: '1 / -1' }} aria-label="Execution history">
               <h2>Execution progress &amp; history</h2>
-              {[...executions].reverse().map((e) => <div key={e.id} style={{ borderTop: e === lastExec ? undefined : '1px solid var(--border)', paddingTop: 8 }}><ExecutionView e={e} s={state} /></div>)}
+              {[...executions].reverse().map((e) => <div key={e.id} style={{ borderTop: e === lastExec ? undefined : '1px solid var(--border)', paddingTop: 8 }}><ExecutionView e={e} s={state} now={now} /></div>)}
             </section>
           )}
+          {!t.isParent && <div style={{ gridColumn: '1 / -1' }}><SimilarIncidentsPanel ticketId={t.id} /></div>}
         </div>
       )}
 
@@ -296,8 +355,8 @@ export function IncidentDetailPage() {
         </div>
       )}
 
-      {modal && 'kind' in modal && (modal.kind === 'REJECT' || modal.kind === 'REQUEST_REVIEW' || modal.kind === 'ESCALATE' || modal.kind === 'REOPEN' || modal.kind === 'REOPEN_EMP') && (
-        <Modal title={{ REJECT: 'Reject plan', REQUEST_REVIEW: 'Request review', ESCALATE: 'Escalate ticket', REOPEN: 'Reopen ticket', REOPEN_EMP: 'Simulate employee reopening' }[modal.kind]} onClose={() => setModal(null)}
+      {modal && 'kind' in modal && (modal.kind === 'REJECT' || modal.kind === 'REQUEST_REVIEW' || modal.kind === 'ESCALATE' || modal.kind === 'REOPEN' || modal.kind === 'REOPEN_EMP' || modal.kind === 'REJECT_STEP') && (
+        <Modal title={{ REJECT: 'Reject plan', REQUEST_REVIEW: 'Request review', ESCALATE: 'Escalate ticket', REOPEN: 'Reopen ticket', REOPEN_EMP: 'Simulate employee reopening', REJECT_STEP: `Reject step ${pausedStep?.id ?? ''}` }[modal.kind]} onClose={() => setModal(null)}
           footer={<><button className="btn" onClick={() => setModal(null)}>Cancel</button><button className={`btn ${modal.kind === 'REJECT' || modal.kind === 'ESCALATE' ? 'btn-danger-solid' : 'btn-primary'}`} disabled={reason.trim().length < 3 || submitting} onClick={() => {
             const k = modal.kind;
             const r = k === 'REOPEN' || k === 'REOPEN_EMP' ? run({ type: 'REOPEN', ticketId: t.id, reason, byEmployee: k === 'REOPEN_EMP' }) : run({ type: k, ticketId: t.id, reason });
@@ -313,6 +372,14 @@ export function IncidentDetailPage() {
           <dl className="kv"><dt>Plan</dt><dd>{rb.id} v{rb.version} — {rb.title}</dd><dt>Device</dt><dd>{dev.name}</dd><dt>Risk</dt><dd><RiskBadge risk={d.risk} /> score <ScoreBadge score={d.confidence} /></dd><dt>Impact</dt><dd>{rb.disruptive ? `Disruptive for ~${rb.expectedMin} min; employee consent required before execution` : 'Non-disruptive'}</dd><dt>Rollback</dt><dd>{rb.reversible ? rb.rollbackSteps.join('; ') : rb.recoveryNote}</dd></dl>
           <label className="field">Maintenance window start ({TZ})<input type="datetime-local" data-autofocus value={schedAt} min={toLocalInput(now + MIN)} max={toLocalInput(now + 24 * 60 * MIN)} onChange={(e) => setSchedAt(e.target.value)} /><span className="hint">Between now + 1 minute and now + 24 hours. Approval remains valid until {state.policy.approvalTTLMin} min after the window.</span></label>
           <label className="check"><input type="checkbox" checked={impactOk} onChange={(e) => setImpactOk(e.target.checked)} data-testid="impact-confirm" />I confirm the impact, maintenance window and rollback limits above{d.risk === 'HIGH' ? ' (required for HIGH risk)' : ''}.</label>
+        </Modal>
+      )}
+      {modal && modal.kind === 'STEP' && pausedStep && rb && (
+        <Modal title={`Approve step ${pausedStep.id}`} onClose={() => setModal(null)}
+          footer={<><button className="btn" onClick={() => setModal(null)}>Cancel</button><button className="btn btn-primary" data-testid="confirm-step" disabled={submitting || (pausedStep.risk === 'HIGH' && !impactOk)} onClick={() => { const r = run({ type: 'APPROVE_STEP', ticketId: t.id, impactConfirmed: impactOk, scheduleAt: schedAt ? new Date(schedAt).toISOString() : undefined }); if (r?.ok) setModal(null); }}>{schedAt ? 'Approve & schedule step' : 'Approve & run step now'}</button></>}>
+          <dl className="kv"><dt>Step</dt><dd>{pausedStep.id} · {pausedStep.description}</dd><dt>Type · risk</dt><dd>{pausedStep.type} · <RiskBadge risk={pausedStep.risk} /></dd><dt>Expected result</dt><dd>{pausedStep.expectedResult}</dd><dt>Verification</dt><dd>{pausedStep.verification}</dd><dt>Recovery</dt><dd>{rb.reversible ? rb.rollbackSteps.join('; ') : rb.recoveryNote}</dd><dt>Scope</dt><dd>{t.displayId} · {dev.name} · {rb.actionKey} · {rb.id} v{rb.version} · plan <span className="mono">{d?.planHash.slice(0, 8)}</span></dd></dl>
+          <label className="field">Optional: schedule this step ({TZ})<input type="datetime-local" value={schedAt} min={toLocalInput(now + MIN)} max={toLocalInput(now + 24 * 60 * MIN)} onChange={(e) => setSchedAt(e.target.value)} /><span className="hint">Leave empty to run now. Changing the runbook, plan or policy before it runs invalidates this approval.</span></label>
+          <label className="check"><input type="checkbox" checked={impactOk} onChange={(e) => setImpactOk(e.target.checked)} data-testid="step-impact-confirm" />I confirm the impact and recovery limits of this step{pausedStep.risk === 'HIGH' ? ' (required for HIGH risk)' : ''}.</label>
         </Modal>
       )}
       {modal && modal.kind === 'MANUAL' && (

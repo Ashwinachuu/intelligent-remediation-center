@@ -1,4 +1,4 @@
-import { HEALTHY_DEVICE, REQUESTERS, SCENARIOS, seedRunbooks, BASELINES } from '../domain/catalog';
+import { DEFAULT_ASSUMPTIONS, HEALTHY_DEVICE, REQUESTERS, SCENARIOS, seedRunbooks, BASELINES } from '../domain/catalog';
 import { applyAction, processDue, type Action, type Timing } from '../domain/engine';
 import { DEFAULT_POLICY, HISTORICAL_POLICY_V0 } from '../domain/policy';
 import type { Actor, AppState, Category, Device, Outcome } from '../domain/types';
@@ -22,10 +22,10 @@ export function buildSeed(anchorMs: number): AppState {
   try {
     const historyStart = anchorMs - 91 * DAY;
     let s: AppState = {
-      schemaVersion: 1, anchor: iso(anchorMs), seq: { ticket: 0, audit: 0, runbook: 8, device: 0 }, devices: {}, tickets: {}, diagnoses: [],
+      schemaVersion: 2, anchor: iso(anchorMs), seq: { ticket: 0, audit: 0, runbook: 8, device: 0 }, devices: {}, tickets: {}, diagnoses: [],
       runbooks: seedRunbooks(iso(historyStart)), policy: HISTORICAL_POLICY_V0,
       policyHistory: [{ policy: HISTORICAL_POLICY_V0, reason: 'Historical pilot policy v0 (synthetic): preapproval enabled for LOW-risk ≥ 97', actor: 'Morgan', role: 'ADMIN', at: iso(historyStart) }],
-      approvals: [], executions: [], jobs: [], audit: [], notifications: [], settings: { role: 'AGENT' },
+      approvals: [], executions: [], jobs: [], audit: [], notifications: [], stepApprovals: [], settings: { role: 'AGENT', assumptions: DEFAULT_ASSUMPTIONS },
     };
     const run = (action: Action, at: number, actor: Actor = ALEX) => {
       const r = applyAction(s, action, at, { actor });
@@ -107,9 +107,25 @@ export function buildSeed(anchorMs: number): AppState {
       { ...HEALTHY_DEVICE, id: 'dev-unm-0013', name: 'LT-UNM-0013 (demo fleet)', managed: false, freeGB: 5 },
     ];
     s = { ...s, devices: { ...s.devices, ...Object.fromEntries(fleet.map((f) => [f.id, f])) } };
-    // Today's featured demo scenarios.
-    SCENARIOS.forEach((sc, idx) => {
-      run({ type: 'CREATE_TICKET', input: { title: sc.title, description: sc.description, requester: REQUESTERS[idx], source: sc.source, priority: sc.priority, category: sc.category, outcome: sc.outcome, newDevice: sc.device, scenario: sc.key, demo: true } }, anchorMs - (SCENARIOS.length - idx) * 4 * MIN, sc.source === 'DETECTION' ? DETECT : { name: REQUESTERS[idx], role: 'EMPLOYEE' });
+    // Today's featured demo scenarios A–H (Spec §10), created 60–28 minutes before now.
+    const AH = SCENARIOS.filter((sc) => sc.key <= 'H');
+    AH.forEach((sc, idx) => {
+      run({ type: 'CREATE_TICKET', input: { title: sc.title, description: sc.description, requester: REQUESTERS[idx], source: sc.source, priority: sc.priority, category: sc.category, outcome: sc.outcome, newDevice: sc.device, scenario: sc.key, demo: true } }, anchorMs - (60 - idx * 4) * MIN, sc.source === 'DETECTION' ? DETECT : { name: REQUESTERS[idx], role: 'EMPLOYEE' });
+    });
+    // Enhancement scenario I: multi-step OS patch, approved + consented, paused at the HIGH-risk install step.
+    {
+      const sc = SCENARIOS.find((x) => x.key === 'I')!;
+      const t0 = anchorMs - 25 * MIN;
+      const id = run({ type: 'CREATE_TICKET', input: { title: sc.title, description: sc.description, requester: REQUESTERS[8], source: sc.source, priority: sc.priority, category: sc.category, outcome: sc.outcome, newDevice: sc.device, scenario: 'I', demo: true } }, t0, DETECT).ticketId!;
+      run({ type: 'APPROVE', ticketId: id, scheduleAt: iso(t0 + 3 * MIN), impactConfirmed: true }, t0 + MIN, MORGAN);
+      run({ type: 'CONSENT', ticketId: id, grant: true }, t0 + 2 * MIN, { name: REQUESTERS[8], role: 'EMPLOYEE' });
+      advance(t0 + 6 * MIN, { stepMs: 700, verifyMs: 900, closeMs: 700 }, t0 + 3 * MIN);
+    }
+    // Enhancement scenario J: three employees on the same office network report Wi-Fi drops within minutes.
+    [0, 1, 2].forEach((k) => {
+      const sc = SCENARIOS.find((x) => x.key === 'J')!;
+      const who = REQUESTERS[10 + k];
+      run({ type: 'CREATE_TICKET', input: { title: sc.title, description: sc.description, requester: who, source: 'EMPLOYEE', priority: sc.priority, category: sc.category, outcome: 'SUCCESS', newDevice: sc.device, scenario: 'J', demo: true } }, anchorMs - (18 - k * 4) * MIN, { name: who, role: 'EMPLOYEE' });
     });
     // Keep only the last 7 days of simulated in-app notifications to bound storage size.
     return { ...s, notifications: s.notifications.filter((n) => ms(n.at) >= anchorMs - 7 * DAY).map((n) => (ms(n.at) < anchorMs - DAY ? { ...n, read: true } : n)) };

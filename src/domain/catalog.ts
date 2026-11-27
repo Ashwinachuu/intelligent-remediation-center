@@ -1,4 +1,4 @@
-import type { Category, Device, Risk, Runbook, Outcome, ScenarioKey } from './types';
+import type { Category, Device, Maturity, Risk, Runbook, RunbookStep, Outcome, ScenarioKey } from './types';
 
 export const CATEGORIES: Category[] = ['STORAGE', 'DNS', 'SERVICE', 'WIFI', 'RESTART', 'APP_UPDATE', 'OS_UPDATE', 'CRASH', 'UNKNOWN'];
 export const CATEGORY_LABEL: Record<Category, string> = {
@@ -13,6 +13,9 @@ export const BASELINES: Record<Category, { agentMin: number; resolutionMin: numb
   OS_UPDATE: { agentMin: 40, resolutionMin: 120 }, CRASH: { agentMin: 60, resolutionMin: 180 }, UNKNOWN: { agentMin: 45, resolutionMin: 120 },
 };
 
+/** Default, editable estimate assumptions (enhancement §9). Fictional currency amounts; estimates only. */
+export const DEFAULT_ASSUMPTIONS = { hourlyCost: 40, currency: 'USD', baselines: JSON.parse(JSON.stringify(BASELINES)) as typeof BASELINES };
+
 /** Default simulated scores and risk (Spec §5). Labelled simulated — not calibrated probabilities. */
 export const DEFAULT_SCORE: Record<Category, { score: number; risk: Risk }> = {
   STORAGE: { score: 98, risk: 'LOW' }, DNS: { score: 97, risk: 'LOW' }, SERVICE: { score: 96, risk: 'LOW' },
@@ -24,7 +27,29 @@ export const INCONSISTENT_SCORE = 65;
 export const HEALTHY_DEVICE: Omit<Device, 'id' | 'name'> = {
   os: 'Windows 11', group: 'Standard', online: true, busy: false, managed: true, freeGB: 48, appVersion: '2.1',
   osVersion: '24H2', wifiHealthy: true, serviceHealthy: true, restartPending: false, dnsHealthy: true,
+  batteryPct: 82, location: 'Remote · home office', networkId: 'HOME', kind: 'ENDPOINT',
 };
+/** Shared office network used by the correlation demo (scenario J). Fictional. */
+export const SHARED_NETWORK = { location: 'Site B · Floor 2', networkId: 'NET-B2' };
+
+/** Resolution SLA targets by priority (enhancement §1). */
+export const SLA_HOURS: Record<'P2' | 'P3' | 'P4', number> = { P2: 4, P3: 8, P4: 24 };
+
+export const MATURITY_LABEL: Record<Maturity, string> = {
+  0: 'L0 · Manual resolution', 1: 'L1 · AI recommendation only', 2: 'L2 · Human-approved execution', 3: 'L3 · Policy-based autonomous', 4: 'L4 · Proactive policy-based',
+};
+
+const step = (id: string, description: string, type: RunbookStep['type'], risk: Risk, approval: RunbookStep['approval'], dependsOn: string[], expectedResult: string, verification: string, recoverable: boolean): RunbookStep =>
+  ({ id, description, type, risk, approval, dependsOn, expectedResult, verification, recoverable });
+
+/** Default 3-step structure: read-only preflight/snapshot -> plan-authorized action -> read-only post-check. */
+export function defaultStepDefs(steps: string[], risk: Risk, checks: string[], reversible: boolean): RunbookStep[] {
+  return [
+    step('S1', steps[0] ?? 'Preflight', 'SNAPSHOT', 'LOW', 'NONE', [], 'Snapshot captured; prerequisites confirmed', 'Snapshot stored', true),
+    step('S2', steps[1] ?? 'Action', 'ACTION', risk, 'PLAN', ['S1'], 'Intended change applied', checks.join('; ') || 'Change applied', reversible),
+    step('S3', steps[2] ?? 'Post-check', 'DIAGNOSTIC', 'LOW', 'NONE', ['S2'], 'Post-change signals collected', 'Signals available for verification', true),
+  ];
+}
 
 /** Fictional device condition that reproduces each category's symptom. */
 export function symptomFor(cat: Category): Partial<Device> {
@@ -83,40 +108,51 @@ export const SIM_ACTIONS: Partial<Record<Category, SimAction>> = {
 };
 
 export function seedRunbooks(at: string): Runbook[] {
-  const base = (r: Partial<Runbook> & Pick<Runbook, 'id' | 'title' | 'category' | 'risk' | 'steps' | 'checks' | 'rollbackSteps' | 'reversible' | 'disruptive' | 'expectedMin' | 'preapproved' | 'recoveryNote' | 'prerequisites'>): Runbook => ({
-    version: 1, status: 'APPROVED', supportedOS: ['Windows 11'], owner: 'Morgan (Admin)', publishedAt: at, actionKey: r.category,
-    diagnosticOnly: false, sourceTicketIds: [], createdAt: at, testedScenario: 'Simulator catalog scenario', changeNote: 'Initial catalog publication', ...r,
+  const base = (r: Partial<Runbook> & Pick<Runbook, 'id' | 'title' | 'category' | 'risk' | 'steps' | 'checks' | 'rollbackSteps' | 'reversible' | 'disruptive' | 'expectedMin' | 'maturity' | 'recoveryNote' | 'prerequisites'>): Runbook => ({
+    version: 1, status: 'APPROVED', supportedOS: ['Windows 11'], owner: 'Morgan (Admin)', publishedAt: at, actionKey: r.category, reviewedBy: 'Morgan',
+    diagnosticOnly: false, sourceTicketIds: [], createdAt: at, testedScenario: 'Simulator catalog scenario', changeNote: 'Initial catalog publication',
+    stepDefs: r.stepDefs ?? defaultStepDefs(r.steps, r.risk, r.checks, r.reversible), restartRequired: false,
+    maturityHistory: r.maturity > 2 ? [{ from: 2, to: r.maturity, at, actor: 'Morgan', reason: 'Pilot promotion (synthetic): LOW risk, non-disruptive, criteria met in pre-production' }] : [],
+    ...r,
   });
   return [
-    base({ id: 'RB-001', title: 'Clear approved disposable cache', category: 'STORAGE', risk: 'LOW', expectedMin: 3, preapproved: true, reversible: false, disruptive: false,
+    base({ id: 'RB-001', title: 'Clear approved disposable cache', category: 'STORAGE', risk: 'LOW', expectedMin: 3, maturity: 4, reversible: false, disruptive: false,
       steps: ['Preflight: confirm managed channel, record free space snapshot', 'Action: clear approved disposable cache locations only (no user files)', 'Verify: re-measure free disk space'],
       checks: ['Free disk space ≥ 10 GB'], rollbackSteps: [], recoveryNote: 'Cache removal is not reversible; only approved disposable cache is removed, never user files.', prerequisites: ['Managed endpoint online', 'Free space below 10 GB'] }),
-    base({ id: 'RB-002', title: 'Refresh DNS resolver cache', category: 'DNS', risk: 'LOW', expectedMin: 2, preapproved: true, reversible: false, disruptive: false,
+    base({ id: 'RB-002', title: 'Refresh DNS resolver cache', category: 'DNS', risk: 'LOW', expectedMin: 2, maturity: 2, reversible: false, disruptive: false,
       steps: ['Preflight: confirm DNS probe failure, snapshot resolver settings', 'Action: flush and refresh DNS resolver cache', 'Verify: run DNS probe against 3 internal names'],
       checks: ['DNS probe resolves 3/3 internal names'], rollbackSteps: [], recoveryNote: 'No exact cache restoration exists; refresh is safe and self-healing.', prerequisites: ['Managed endpoint online', 'DNS probe failing'] }),
-    base({ id: 'RB-003', title: 'Restart non-critical background service', category: 'SERVICE', risk: 'LOW', expectedMin: 4, preapproved: true, reversible: true, disruptive: false,
+    base({ id: 'RB-003', title: 'Restart non-critical background service', category: 'SERVICE', risk: 'LOW', expectedMin: 4, maturity: 2, reversible: true, disruptive: false,
       steps: ['Preflight: snapshot service state, confirm service is non-critical', 'Action: restart background sync service', 'Verify: check service is running'],
       checks: ['Service state = Running'], rollbackSteps: ['Restore previous service state from snapshot'], recoveryNote: 'Previous service state is restored from the preflight snapshot.', prerequisites: ['Managed endpoint online', 'Service listed as non-critical'] }),
-    base({ id: 'RB-004', title: 'Reset Wi-Fi adapter and renew configuration', category: 'WIFI', risk: 'MEDIUM', expectedMin: 5, preapproved: false, reversible: true, disruptive: true,
+    base({ id: 'RB-004', title: 'Reset Wi-Fi adapter and renew configuration', category: 'WIFI', risk: 'MEDIUM', expectedMin: 5, maturity: 2, reversible: true, disruptive: true,
       steps: ['Preflight: snapshot network configuration', 'Action: reset adapter and renew configuration', 'Verify: connectivity probe to 3 endpoints'],
       checks: ['Connectivity probe 3/3 endpoints reachable'], rollbackSteps: ['Restore snapshotted network fields'], recoveryNote: 'Network fields are restored from the snapshot taken in preflight.', prerequisites: ['Management channel reachable', 'Employee consent (brief network drop)', 'Explicit agent approval'] }),
-    base({ id: 'RB-005', title: 'Scheduled restart to clear pending reboot', category: 'RESTART', risk: 'MEDIUM', expectedMin: 8, preapproved: false, reversible: false, disruptive: true,
+    base({ id: 'RB-005', title: 'Scheduled restart to clear pending reboot', category: 'RESTART', risk: 'MEDIUM', expectedMin: 8, maturity: 2, reversible: false, disruptive: true,
       steps: ['Preflight: check employee availability and unsaved-work signal', 'Action: simulate reboot', 'Verify: reconnect and uptime check'],
-      checks: ['Device reconnects', 'Restart pending flag cleared'], rollbackSteps: [], recoveryNote: 'A reboot is irreversible; consent and agent approval are required.', prerequisites: ['Employee consent', 'Agent approval', 'Device not busy'] }),
-    base({ id: 'RB-006', title: 'Install allowlisted app version 2.1', category: 'APP_UPDATE', risk: 'MEDIUM', expectedMin: 12, preapproved: false, reversible: true, disruptive: true,
+      restartRequired: true, checks: ['Device reconnects', 'Restart pending flag cleared'], rollbackSteps: [], recoveryNote: 'A reboot is irreversible; consent and agent approval are required.', prerequisites: ['Employee consent', 'Agent approval', 'Device not busy'] }),
+    base({ id: 'RB-006', title: 'Install allowlisted app version 2.1', category: 'APP_UPDATE', risk: 'MEDIUM', expectedMin: 12, maturity: 2, reversible: true, disruptive: true,
       steps: ['Preflight: snapshot installed version, confirm 2.1 allowlisted', 'Action: install app version 2.1', 'Verify: version and app health check'],
       checks: ['App version = 2.1', 'App health check passing'], rollbackSteps: ['Restore previous app version from snapshot'], recoveryNote: 'Previous app version restored from snapshot.', prerequisites: ['Agent approval', 'Employee consent (app restarts)'] }),
-    base({ id: 'RB-007', title: 'Apply approved OS patch 24H2', category: 'OS_UPDATE', risk: 'HIGH', expectedMin: 25, preapproved: false, reversible: true, disruptive: true,
+    base({ id: 'RB-007', title: 'Apply approved OS patch 24H2', category: 'OS_UPDATE', risk: 'HIGH', expectedMin: 25, maturity: 2, reversible: true, disruptive: true,
       steps: ['Preflight: validate compatibility and maintenance window', 'Action: apply approved patch 24H2', 'Verify: OS version and post-patch health'],
+      restartRequired: true,
+      stepDefs: [
+        step('S1', 'Compatibility & driver scan (read-only)', 'DIAGNOSTIC', 'LOW', 'NONE', [], 'Device compatible with 24H2; drivers on allowlist', 'Scan report generated', true),
+        step('S2', 'Create restore point (snapshot)', 'SNAPSHOT', 'MEDIUM', 'PLAN', ['S1'], 'Restore point created', 'Restore point listed', true),
+        step('S3', 'Apply approved OS patch 24H2 (restart)', 'ACTION', 'HIGH', 'STEP', ['S2'], 'OS build 24H2 installed', 'OS build = 24H2', true),
+        step('S4', 'Post-patch signal collection (read-only)', 'DIAGNOSTIC', 'LOW', 'NONE', ['S3'], 'Health signals collected', 'Signals available for verification', true),
+      ],
       checks: ['OS build = 24H2', 'Post-patch health passing'], rollbackSteps: ['Simulated restore to prior OS build (supported on Windows 11 only)'], recoveryNote: 'Simulated restore to the prior OS build where supported.', prerequisites: ['Admin approval', 'Employee consent', 'Scheduled maintenance window'] }),
     { id: 'RB-008', version: 1, title: 'Application crash triage (diagnostic only)', category: 'CRASH', status: 'DRAFT', risk: 'HIGH', supportedOS: ['Windows 11'],
       steps: ['Collect simulated crash evidence', 'Compare faulting module with known-issue list', 'Hand off to human reviewer'], checks: ['Crash evidence attached to ticket'], rollbackSteps: [],
-      reversible: false, disruptive: false, expectedMin: 10, owner: 'Morgan (Admin)', preapproved: false, diagnosticOnly: true, prerequisites: ['Human review'],
+      reversible: false, disruptive: false, expectedMin: 10, owner: 'Morgan (Admin)', maturity: 1, diagnosticOnly: true, prerequisites: ['Human review'],
+      stepDefs: [step('S1', 'Collect simulated crash evidence', 'DIAGNOSTIC', 'LOW', 'NONE', [], 'Evidence attached', 'Evidence present', true)], maturityHistory: [], restartRequired: false,
       recoveryNote: 'Diagnostic only — no device change is made.', sourceTicketIds: [], createdAt: at, changeNote: 'Draft: safe diagnostic-only guidance; not executable' },
   ];
 }
 
-export const isExecutable = (r: Runbook) => r.status === 'APPROVED' && !r.diagnosticOnly && !!r.actionKey && !!SIM_ACTIONS[r.actionKey] && r.actionKey === r.category;
+export const isExecutable = (r: Runbook) => r.status === 'APPROVED' && r.maturity >= 2 && !r.diagnosticOnly && !!r.actionKey && !!SIM_ACTIONS[r.actionKey] && r.actionKey === r.category;
 
 /** Keyword inference for custom text (Spec §5). Multiple conflicting matches or no match -> UNKNOWN. */
 const KEYWORDS: [Category, RegExp][] = [
@@ -145,6 +181,8 @@ export const SCENARIOS: ScenarioDef[] = [
   { key: 'F', label: 'F · Offline Wi-Fi', category: 'WIFI', outcome: 'SUCCESS', title: 'Wi-Fi not working at home', description: 'Cannot connect to home Wi-Fi.', device: { wifiHealthy: false, online: false }, priority: 'P3', source: 'EMPLOYEE', expected: 'Reconnect, then approval/consent' },
   { key: 'G', label: 'G · Unknown hardware issue', category: 'UNKNOWN', outcome: 'SUCCESS', title: 'Laptop makes clicking noise', description: 'Intermittent clicking sound and slow response.', device: {}, priority: 'P3', source: 'EMPLOYEE', expected: 'Escalated, investigate manually' },
   { key: 'H', label: 'H · App rollback failure', category: 'APP_UPDATE', outcome: 'ROLLBACK_FAIL', title: 'Productivity app outdated', description: 'App shows update-required banner.', device: { appVersion: '2.0' }, priority: 'P4', source: 'DETECTION', expected: 'Failure, rollback fails, escalated' },
+  { key: 'I', label: 'I · Multi-step OS patch', category: 'OS_UPDATE', outcome: 'SUCCESS', title: 'Quarterly OS patch with driver check', description: 'Multi-step patch: read-only scan runs automatically, pauses for admin at the high-risk install step.', device: { osVersion: '23H2' }, priority: 'P3', source: 'DETECTION', expected: 'Pauses at high-risk step for admin step approval' },
+  { key: 'J', label: 'J · Shared network outage', category: 'WIFI', outcome: 'SUCCESS', title: 'Wi-Fi not connecting on Floor 2', description: 'Multiple employees on Site B Floor 2 report Wi-Fi connectivity drops.', device: { wifiHealthy: false, ...SHARED_NETWORK }, priority: 'P2', source: 'EMPLOYEE', expected: '3 reports correlated; parent incident, endpoint fixes paused' },
 ];
 
 export const REQUESTERS = Array.from({ length: 40 }, (_, i) => `Employee ${String(i + 1).padStart(3, '0')}`);

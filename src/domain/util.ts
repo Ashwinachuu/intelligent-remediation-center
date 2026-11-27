@@ -17,7 +17,6 @@ export function hashString(s: string): string {
   return (h1.toString(16).padStart(8, '0') + h2.toString(16).padStart(8, '0'));
 }
 
-let counter = 0;
 let deterministicSeed: (() => number) | null = null;
 export function setDeterministicIds(seed: number | null) {
   if (seed === null) { deterministicSeed = null; return; }
@@ -27,7 +26,6 @@ export function uuid(): string {
   if (!deterministicSeed && typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
   const r = deterministicSeed ?? Math.random;
   const hex = Array.from({ length: 32 }, () => Math.floor(r() * 16).toString(16)).join('');
-  counter++;
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 

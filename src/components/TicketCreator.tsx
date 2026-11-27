@@ -19,6 +19,7 @@ export function TelemetryPreview({ d }: { d: Omit<Device, 'id'> }) {
     ['Mgmt channel', d.online ? 'Online' : 'Offline', d.online], ['Employee busy', d.busy ? 'Yes' : 'No', !d.busy], ['Free disk', `${d.freeGB} GB`, d.freeGB >= 10],
     ['DNS', d.dnsHealthy ? 'Healthy' : 'Failing', d.dnsHealthy], ['Service', d.serviceHealthy ? 'Running' : 'Stopped', d.serviceHealthy], ['Wi-Fi', d.wifiHealthy ? 'Healthy' : 'Unhealthy', d.wifiHealthy],
     ['Restart pending', d.restartPending ? 'Yes' : 'No', !d.restartPending], ['App version', d.appVersion, d.appVersion === '2.1'],
+    ['Battery', `${d.batteryPct}%`, d.batteryPct >= 30], ['Network · location', `${d.networkId} · ${d.location}`, true],
   ];
   return (
     <dl className="kv" aria-label="Telemetry preview">
@@ -41,7 +42,7 @@ export function TicketCreator() {
   const [category, setCategory] = useState<Category | 'CUSTOM'>(sc0.category);
   const [outcome, setOutcome] = useState<Outcome>(sc0.outcome);
   const [deviceMode, setDeviceMode] = useState<'NEW' | string>('NEW');
-  const [dev, setDev] = useState<Partial<Device>>({ os: 'Windows 11', group: 'Standard', managed: true, online: sc0.device.online ?? true, busy: false });
+  const [dev, setDev] = useState<Partial<Device>>({ os: 'Windows 11', group: 'Standard', managed: true, online: sc0.device.online ?? true, busy: false, ...(sc0.device.networkId ? { networkId: sc0.device.networkId, location: sc0.device.location } : {}) });
   const [touched, setTouched] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -49,7 +50,7 @@ export function TicketCreator() {
     const sc = SCENARIOS.find((s) => s.key === key);
     if (!sc) return;
     setTitle(sc.title); setDescription(sc.description); setSource(sc.source); setPriority(sc.priority); setCategory(sc.category); setOutcome(sc.outcome);
-    setDeviceMode('NEW'); setDev({ os: 'Windows 11', group: 'Standard', managed: true, online: sc.device.online ?? true, busy: false });
+    setDeviceMode('NEW'); setDev({ os: 'Windows 11', group: 'Standard', managed: true, online: sc.device.online ?? true, busy: false, ...(sc.device.networkId ? { networkId: sc.device.networkId, location: sc.device.location } : {}) });
   };
   const inferred = useMemo(() => inferCategory(`${title} ${description}`), [title, description]);
   const effCat: Category = category === 'CUSTOM' ? inferred.category : category;
@@ -111,6 +112,7 @@ export function TicketCreator() {
               <label className="check"><input type="checkbox" checked={dev.managed} onChange={(e) => setDev({ ...dev, managed: e.target.checked })} />Managed endpoint</label>
               <label className="check"><input type="checkbox" checked={dev.online} onChange={(e) => setDev({ ...dev, online: e.target.checked })} />Management channel online</label>
               <label className="check"><input type="checkbox" checked={dev.busy} onChange={(e) => setDev({ ...dev, busy: e.target.checked })} />Employee busy</label>
+              <label className="field">Battery %<input type="number" min={0} max={100} value={dev.batteryPct ?? 82} onChange={(e) => setDev({ ...dev, batteryPct: Number(e.target.value) })} /></label>
             </div>
           ) : <p className="banner warn small" style={{ margin: 0 }}>Existing device: its current telemetry is used as-is and is NOT changed by creating this ticket. Evidence that does not match telemetry lowers the score to 65 and requests validation.</p>}
           <div className="card card-tight"><h3>Telemetry preview</h3><TelemetryPreview d={preview} /></div>

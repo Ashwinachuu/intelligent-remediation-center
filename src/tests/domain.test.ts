@@ -1,6 +1,6 @@
 import { applyAction, processDue, type Action, type CreateTicketInput } from '../domain/engine';
 import { DEFAULT_POLICY, evaluateRoute, validatePolicy } from '../domain/policy';
-import { HEALTHY_DEVICE, seedRunbooks, inferCategory } from '../domain/catalog';
+import { DEFAULT_ASSUMPTIONS, HEALTHY_DEVICE, seedRunbooks, inferCategory } from '../domain/catalog';
 import { computeDiagnosis } from '../domain/diagnosis';
 import type { Actor, AppState, Category, Device, Outcome, Policy, Runbook } from '../domain/types';
 import { DAY, MIN, iso } from '../domain/util';
@@ -13,9 +13,9 @@ const RILEY: Actor = { name: 'Riley', role: 'MANAGER' };
 
 export function emptyState(policy: Partial<Policy> = {}): AppState {
   return {
-    schemaVersion: 1, anchor: iso(T0), seq: { ticket: 0, audit: 0, runbook: 8, device: 0 }, devices: {}, tickets: {}, diagnoses: [], runbooks: seedRunbooks(iso(T0 - DAY)),
+    schemaVersion: 2, anchor: iso(T0), seq: { ticket: 0, audit: 0, runbook: 8, device: 0 }, devices: {}, tickets: {}, diagnoses: [], runbooks: seedRunbooks(iso(T0 - DAY)),
     policy: { ...DEFAULT_POLICY, ...policy }, policyHistory: [{ policy: { ...DEFAULT_POLICY, ...policy }, reason: 'test', actor: 'Morgan', role: 'ADMIN', at: iso(T0 - DAY) }],
-    approvals: [], executions: [], jobs: [], audit: [], notifications: [], settings: { role: 'AGENT' },
+    approvals: [], executions: [], jobs: [], audit: [], notifications: [], stepApprovals: [], settings: { role: 'AGENT', assumptions: DEFAULT_ASSUMPTIONS },
   };
 }
 function act(s: AppState, a: Action, t = T0, actor: Actor = ALEX) {
@@ -147,7 +147,10 @@ describe('approval & execution lifecycle', () => {
     s = processDue(s, T0 + 31 * MIN);
     expect(s.executions).toHaveLength(0);
     s = ok(s, { type: 'SET_DEVICE', ticketId: id, online: true }, T0 + 32 * MIN).state;
-    s = drain(s, T0 + 32 * MIN).s;
+    let r = drain(s, T0 + 32 * MIN); s = r.s;
+    expect(status(s, id)).toBe('STEP_APPROVAL'); // multi-step: pauses at the HIGH-risk install step
+    s = ok(s, { type: 'APPROVE_STEP', ticketId: id, impactConfirmed: true }, r.t + 1, MORGAN).state;
+    r = drain(s, r.t + 1); s = r.s;
     expect(status(s, id)).toBe('CLOSED');
   });
   it('advance scheduled job to now re-checks gates and executes', () => {
@@ -156,7 +159,10 @@ describe('approval & execution lifecycle', () => {
     s = ok(s, { type: 'CONSENT', ticketId: id, grant: true }, T0 + MIN).state;
     s = ok(s, { type: 'ADVANCE_SCHEDULE', ticketId: id }, T0 + 2 * MIN).state;
     expect(status(s, id)).toBe('READY');
-    s = drain(s, T0 + 2 * MIN).s;
+    let r = drain(s, T0 + 2 * MIN); s = r.s;
+    expect(status(s, id)).toBe('STEP_APPROVAL');
+    s = ok(s, { type: 'APPROVE_STEP', ticketId: id, impactConfirmed: true }, r.t + 1, MORGAN).state;
+    r = drain(s, r.t + 1); s = r.s;
     expect(status(s, id)).toBe('CLOSED');
     expect(s.audit.some((a) => a.action === 'SCHEDULE_ADVANCED')).toBe(true);
   });
@@ -308,7 +314,8 @@ describe('approval & execution lifecycle', () => {
     const draft = r.state.runbooks.find((x) => x.id === r.ticketId)!;
     expect(draft.status).toBe('DRAFT');
     expect(draft.risk).toBe('HIGH');
-    expect(draft.preapproved).toBe(false);
+    expect(draft.maturity).toBe(0);
+    expect(draft.aiGenerated).toBe(true);
     expect(act(r.state, { type: 'PUBLISH_RUNBOOK', runbookId: draft.id, version: 1, note: 'x' }, T0, MORGAN).ok).toBe(false); // validation fails
   });
 });

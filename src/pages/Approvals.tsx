@@ -3,7 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { CheckCircle2, ChevronDown, ChevronUp, CircleHelp, ExternalLink, Inbox } from 'lucide-react';
 import { useStore } from '../app/store';
 import { CATEGORY_LABEL } from '../domain/catalog';
-import { currentDiagnosis, gatesFor, planRunbook } from '../domain/engine';
+import { currentDiagnosis, gatesFor, pausedExecution, planRunbook, runbookOf } from '../domain/engine';
 import { canRoleApprove } from '../domain/policy';
 import { fmtAge } from '../domain/metrics';
 import type { Risk, Ticket } from '../domain/types';
@@ -75,17 +75,24 @@ export function ApprovalsPage() {
     return RISK_RANK[da.risk] - RISK_RANK[db.risk] || ms(da.createdAt) - ms(db.createdAt);
   }), [state]);
   const consent = Object.values(state.tickets).filter((t) => t.status === 'AWAITING_CONSENT');
+  const steps = Object.values(state.tickets).filter((t) => t.status === 'STEP_APPROVAL');
   const expired = state.approvals.filter((a) => a.expiredLoggedAt || a.invalidatedAt).slice().reverse();
   return (
     <div>
       <div className="page-head"><div><h1>Approvals</h1><p>Highest risk first, then oldest. No bulk approval — each plan is approved individually against its evidence.</p></div></div>
       <div className="tabs" role="tablist">
-        {[['queue', `Approval queue (${queue.length})`], ['consent', `Awaiting consent (${consent.length})`], ['expired', `Expired / invalidated (${expired.length})`]].map(([k, l]) => <button key={k} role="tab" aria-selected={tab === k} onClick={() => setP({ tab: k }, { replace: true })}>{l}</button>)}
+        {[['queue', `Approval queue (${queue.length})`], ['steps', `Step approvals (${steps.length})`], ['consent', `Awaiting consent (${consent.length})`], ['expired', `Expired / invalidated (${expired.length})`]].map(([k, l]) => <button key={k} role="tab" aria-selected={tab === k} onClick={() => setP({ tab: k }, { replace: true })}>{l}</button>)}
       </div>
       {tab === 'queue' && (queue.length ? <div className="stack-16">{queue.map((t) => <ApprovalCard key={t.id} t={t} />)}</div> : <div className="card"><Empty title="No plans awaiting approval" icon={<Inbox size={28} aria-hidden />} /></div>)}
+      {tab === 'steps' && (
+        <div className="table-wrap"><table className="data"><thead><tr><th>Ticket</th><th>Paused step</th><th>Risk</th><th>Required approver</th><th>Scope</th><th>Waiting</th></tr></thead><tbody>
+          {steps.map((t) => { const e = pausedExecution(state, t.id); const rb = e ? runbookOf(state, e) : undefined; const sd = e && rb ? rb.stepDefs[e.stepIndex] : undefined; return (
+            <tr key={t.id}><td><Link to={`/incidents/${t.id}?focus=action`}>{t.displayId}</Link> {t.title}</td><td>{sd ? `${sd.id} · ${sd.description}` : '—'}</td><td><RiskBadge risk={sd?.risk} /></td><td>{sd?.risk === 'HIGH' ? 'Admin' : 'Agent or Admin'}</td><td className="small">{state.devices[t.deviceId].name} · {rb?.id} v{rb?.version} · {rb?.actionKey}</td><td>{fmtAge(now - ms(t.updatedAt))}</td></tr>); })}
+        </tbody></table>{!steps.length && <Empty title="No steps awaiting approval" />}</div>
+      )}
       {tab === 'consent' && (
-        <div className="table-wrap"><table className="data"><thead><tr><th>Ticket</th><th>Requester</th><th>Approved by</th><th>Waiting since</th><th>Status</th></tr></thead><tbody>
-          {consent.map((t) => { const a = state.approvals.filter((x) => x.ticketId === t.id && x.decision === 'APPROVE').slice(-1)[0]; return <tr key={t.id}><td><Link to={`/incidents/${t.id}`}>{t.displayId}</Link> {t.title}</td><td>{t.requester}</td><td>{a ? `${a.actor} · ${fmtShort(a.at)} (expires ${fmtShort(a.expiresAt)})` : '—'}</td><td>{fmtAge(now - ms(t.updatedAt))}</td><td><StatusBadge status={t.status} /></td></tr>; })}
+        <div className="table-wrap"><table className="data"><thead><tr><th>Ticket</th><th>Requester</th><th>Approved by</th><th>Waiting since</th><th>Employee response</th><th>Status</th></tr></thead><tbody>
+          {consent.map((t) => { const a = state.approvals.filter((x) => x.ticketId === t.id && x.decision === 'APPROVE').slice(-1)[0]; return <tr key={t.id}><td><Link to={`/incidents/${t.id}?focus=action`}>{t.displayId}</Link> {t.title}</td><td>{t.requester}</td><td>{a ? `${a.actor} · ${fmtShort(a.at)} (expires ${fmtShort(a.expiresAt)})` : '—'}</td><td>{fmtAge(now - ms(t.updatedAt))}</td><td className="small">{t.employeeResponse ? `${t.employeeResponse.choice.toLowerCase()} · ${fmtShort(t.employeeResponse.at)}` : 'No response yet'}</td><td><StatusBadge status={t.status} /></td></tr>; })}
         </tbody></table>{!consent.length && <Empty title="No consent requests pending" />}</div>
       )}
       {tab === 'expired' && (

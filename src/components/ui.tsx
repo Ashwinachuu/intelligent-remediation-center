@@ -8,7 +8,7 @@ const STATUS_STYLE: Record<Status, { cls: string; Icon: typeof Circle }> = {
   AWAITING_APPROVAL: { cls: 'b-warning', Icon: Hand }, AWAITING_CONSENT: { cls: 'b-warning', Icon: UserCheck }, WAITING_DEVICE: { cls: 'b-neutral', Icon: WifiOff },
   SCHEDULED: { cls: 'b-neutral', Icon: CalendarClock }, READY: { cls: 'b-accent', Icon: Zap }, EXECUTING: { cls: 'b-accent', Icon: Loader2 }, VERIFYING: { cls: 'b-accent', Icon: Loader2 },
   ROLLBACK_AVAILABLE: { cls: 'b-danger', Icon: Undo2 }, ROLLING_BACK: { cls: 'b-danger', Icon: RotateCcw }, ESCALATED: { cls: 'b-danger', Icon: OctagonAlert },
-  RESOLVED: { cls: 'b-success', Icon: CheckCircle2 }, CLOSED: { cls: 'b-success', Icon: CheckCircle2 }, REOPENED: { cls: 'b-warning', Icon: RotateCcw },
+  STEP_APPROVAL: { cls: 'b-warning', Icon: Hand }, RESOLVED: { cls: 'b-success', Icon: CheckCircle2 }, CLOSED: { cls: 'b-success', Icon: CheckCircle2 }, REOPENED: { cls: 'b-warning', Icon: RotateCcw },
 };
 export function StatusBadge({ status }: { status: Status }) {
   const { cls, Icon } = STATUS_STYLE[status];

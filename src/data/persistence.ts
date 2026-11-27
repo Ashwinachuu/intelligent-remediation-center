@@ -2,14 +2,14 @@ import type { AppState } from '../domain/types';
 import { buildSeed } from './seed';
 
 export const STORAGE_KEY = 'remediation-center:v1';
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /** Shallow structural validation — rejects corrupt or incompatible payloads. */
 export function validateState(x: unknown): x is AppState {
   if (!x || typeof x !== 'object') return false;
   const s = x as Record<string, unknown>;
   if (s.schemaVersion !== SCHEMA_VERSION) return false;
-  const arrays = ['diagnoses', 'runbooks', 'policyHistory', 'approvals', 'executions', 'jobs', 'audit', 'notifications'];
+  const arrays = ['diagnoses', 'runbooks', 'policyHistory', 'approvals', 'executions', 'jobs', 'audit', 'notifications', 'stepApprovals'];
   if (!arrays.every((k) => Array.isArray(s[k]))) return false;
   if (!s.tickets || typeof s.tickets !== 'object' || !s.devices || typeof s.devices !== 'object') return false;
   const p = s.policy as Record<string, unknown> | undefined;

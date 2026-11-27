@@ -79,7 +79,7 @@ describe('persistence and export', () => {
     expect(validateState(r.state)).toBe(true);
     const again = loadState(storage, NOW);
     expect(again.warning).toBeUndefined();
-    expect(Object.keys(again.state.tickets)).toHaveLength(368);
+    expect(Object.keys(again.state.tickets)).toHaveLength(372);
   });
   it('CSV cells are protected against spreadsheet injection', () => {
     expect(csvCell('=SUM(A1)')).toBe("'=SUM(A1)");
@@ -91,7 +91,8 @@ describe('persistence and export', () => {
   it('seed has no future timestamps and 8 demo scenarios with expected states', () => {
     expect(seed.audit.every((a) => Date.parse(a.at) <= NOW)).toBe(true);
     const demo = Object.values(seed.tickets).filter((t) => t.demo).sort((a, b) => a.displayId.localeCompare(b.displayId));
-    expect(demo.map((t) => t.status)).toEqual(['AWAITING_APPROVAL', 'AWAITING_APPROVAL', 'AWAITING_APPROVAL', 'AWAITING_APPROVAL', 'REVIEW_REQUIRED', 'WAITING_DEVICE', 'ESCALATED', 'AWAITING_APPROVAL']);
+    expect(demo.map((t) => `${t.scenario}:${t.status}`)).toEqual(['A:AWAITING_APPROVAL', 'B:AWAITING_APPROVAL', 'C:AWAITING_APPROVAL', 'D:AWAITING_APPROVAL', 'E:REVIEW_REQUIRED', 'F:WAITING_DEVICE', 'G:ESCALATED', 'H:AWAITING_APPROVAL',
+      'I:STEP_APPROVAL', 'J:AWAITING_APPROVAL', 'J:AWAITING_APPROVAL', 'J:AWAITING_APPROVAL']);
     expect(seed.executions.every((e) => !e.nextAt)).toBe(true);
   });
 });

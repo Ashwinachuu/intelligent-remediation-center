@@ -1,10 +1,12 @@
-import { ACTORS, BASELINES, CATEGORY_LABEL, HEALTHY_DEVICE, SIM_ACTIONS, inferCategory, isExecutable, symptomFor } from './catalog';
+import { ACTORS, BASELINES, CATEGORY_LABEL, HEALTHY_DEVICE, MATURITY_LABEL, SIM_ACTIONS, SLA_HOURS, defaultStepDefs, inferCategory, isExecutable, symptomFor, telemetryFor } from './catalog';
+import { preflight, preflightSummary } from './preflight';
+import { maturityCriteria } from './maturity';
 import { computeDiagnosis, findRunbook, intakeEligibility } from './diagnosis';
 import { DEFAULT_POLICY, canRoleApprove, evaluateRoute, validatePolicy, type GateResult } from './policy';
 import { DomainError, ESCALATABLE, GATE_STATES, RUNNING_STATES, assertTransition, STATUS_LABEL } from './transitions';
 import type {
   Actor, AppNotification, AppState, Approval, AuditEvent, Category, Device, Diagnosis, EvidenceKind, Execution,
-  Outcome, Policy, Role, Runbook, ScenarioKey, ScheduledJob, Status, Ticket,
+  Outcome, Policy, Role, Runbook, ScenarioKey, ScheduledJob, Status, Ticket, StepApproval, EmployeeChoice, Maturity, Assumptions,
 } from './types';
 import { DAY, MIN, iso, ms, uuid } from './util';
 
@@ -58,6 +60,8 @@ export class Tx {
   addExecution(e: Execution) { this.s.executions = [...this.s.executions, e]; this.dirty = true; }
   exec(id: string) { const e = this.s.executions.find((x) => x.id === id); if (!e) throw new DomainError('NOT_FOUND', 'Execution not found'); return e; }
   patchExecution(id: string, patch: Partial<Execution>) { this.s.executions = this.s.executions.map((e) => (e.id === id ? { ...e, ...patch } : e)); this.dirty = true; }
+  addStepApproval(a: StepApproval) { this.s.stepApprovals = [...this.s.stepApprovals, a]; this.dirty = true; }
+  patchStepApproval(id: string, patch: Partial<StepApproval>) { this.s.stepApprovals = this.s.stepApprovals.map((a) => (a.id === id ? { ...a, ...patch } : a)); this.dirty = true; }
   addJob(j: ScheduledJob) { this.s.jobs = [...this.s.jobs, j]; this.dirty = true; }
   patchJob(id: string, patch: Partial<ScheduledJob>) { this.s.jobs = this.s.jobs.map((j) => (j.id === id ? { ...j, ...patch } : j)); this.dirty = true; }
   /** Central guarded status change. Illegal transitions throw and the transaction is discarded. */
@@ -88,10 +92,28 @@ export function validApproval(s: AppState, t: Ticket, d: Diagnosis | undefined, 
 }
 export const consentValid = (t: Ticket, d: Diagnosis | undefined, now: number) => !!(d && t.consent?.granted && t.consent.planHash === d.planHash && ms(t.consent.expiresAt) > now);
 export const pendingJob = (s: AppState, t: Ticket) => s.jobs.find((j) => j.ticketId === t.id && j.status === 'PENDING');
-export const activeExecution = (s: AppState, ticketId: string) => s.executions.find((e) => e.ticketId === ticketId && ['RUNNING', 'VERIFYING', 'ROLLING_BACK'].includes(e.phase));
-export const deviceBusyWithJob = (s: AppState, deviceId: string) => s.executions.find((e) => e.deviceId === deviceId && ['RUNNING', 'VERIFYING', 'ROLLING_BACK'].includes(e.phase));
+export const activeExecution = (s: AppState, ticketId: string) => s.executions.find((e) => e.ticketId === ticketId && ['RUNNING', 'VERIFYING', 'ROLLING_BACK', 'AWAITING_STEP'].includes(e.phase));
+export const deviceBusyWithJob = (s: AppState, deviceId: string) => s.executions.find((e) => e.deviceId === deviceId && ['RUNNING', 'VERIFYING', 'ROLLING_BACK', 'AWAITING_STEP'].includes(e.phase));
 export const latestAppliedExecution = (s: AppState, ticketId: string) => [...s.executions].reverse().find((e) => e.ticketId === ticketId && !!e.appliedAt);
 export const attemptsForRevision = (s: AppState, ticketId: string, revision: number) => s.executions.filter((e) => e.ticketId === ticketId && e.diagnosisRevision === revision && e.phase !== 'CANCELLED').length;
+
+/** Shared-incident hold: endpoint remediation pauses while the linked parent incident is open (enhancement §7). */
+export function holdReasonFor(s: AppState, t: Ticket): string | undefined {
+  if (!t.parentId) return undefined;
+  const p = s.tickets[t.parentId];
+  if (!p || p.status === 'RESOLVED' || p.status === 'CLOSED') return undefined;
+  return `On hold: linked to shared incident ${p.displayId} under investigation — individual endpoint remediation paused`;
+}
+export const runbookOf = (s: AppState, e: Execution) => s.runbooks.find((r) => r.id === e.runbookId && r.version === e.version);
+/** A step approval is valid only for the same execution, step, endpoint, action, runbook version and plan — and only while that runbook version is still approved. */
+export function validStepApproval(s: AppState, e: Execution, now: number): StepApproval | undefined {
+  const rb = runbookOf(s, e);
+  const sd = rb?.stepDefs[e.stepIndex];
+  if (!rb || !sd || rb.status !== 'APPROVED') return undefined;
+  return s.stepApprovals.find((a) => a.decision === 'APPROVE' && a.executionId === e.id && a.stepId === sd.id && a.deviceId === e.deviceId && a.runbookId === rb.id
+    && a.runbookVersion === rb.version && a.actionKey === (rb.actionKey ?? '') && a.planHash === e.planHash && !a.invalidatedAt && ms(a.expiresAt) > now);
+}
+export const pausedExecution = (s: AppState, ticketId: string) => s.executions.find((e) => e.ticketId === ticketId && (e.phase === 'AWAITING_STEP' || (e.phase === 'RUNNING' && !!e.stepScheduledFor && !e.appliedAt)));
 
 export interface Gates extends GateResult { diagnosis?: Diagnosis; runbook?: Runbook; approval?: Approval; job?: ScheduledJob; device: Device; consentOk: boolean }
 export function gatesFor(s: AppState, ticketId: string, now: number, override: { approvalValid?: boolean; scheduleDueAt?: string } = {}): Gates {
@@ -108,6 +130,7 @@ export function gatesFor(s: AppState, ticketId: string, now: number, override: {
   const g = evaluateRoute({
     confidence: diagnosis.confidence, risk: diagnosis.risk, runbook, device, policy: s.policy,
     approvalValid: override.approvalValid ?? !!approval, consentValid: consentOk, scheduleDueAt: override.scheduleDueAt ?? job?.dueAt, now,
+    source: t.source, holdReason: holdReasonFor(s, t),
   });
   return { ...g, diagnosis, runbook, approval, job, device, consentOk };
 }
@@ -138,9 +161,25 @@ function invalidateConsent(tx: Tx, ticketId: string, newHash: string, reason: st
   }
 }
 
+function invalidateStepApprovals(tx: Tx, execId: string, reason: string) {
+  for (const a of tx.s.stepApprovals) if (a.executionId === execId && a.decision === 'APPROVE' && !a.invalidatedAt && !a.usedAt) {
+    tx.patchStepApproval(a.id, { invalidatedAt: tx.nowIso, invalidReason: reason });
+    tx.audit({ ticketId: a.ticketId, action: 'STEP_APPROVAL_INVALIDATED', reason, metadata: { stepApprovalId: a.id, stepId: a.stepId, runbook: `${a.runbookId} v${a.runbookVersion}` }, actor: SYSTEM, result: 'INFO' });
+  }
+}
+/** Cancel an execution that is paused before any device mutation (approved action changed, escalated, rejected or held). */
+function cancelPausedExecution(tx: Tx, ticketId: string, reason: string) {
+  const e = pausedExecution(tx.s, ticketId);
+  if (!e) return;
+  tx.patchExecution(e.id, { phase: 'CANCELLED', endedAt: tx.nowIso, nextAt: undefined, stepScheduledFor: undefined, cancelReason: reason });
+  invalidateStepApprovals(tx, e.id, reason);
+  tx.audit({ ticketId, action: 'EXECUTION_CANCELLED', reason: `${reason}; no device change applied`, metadata: { executionId: e.id }, actor: SYSTEM, result: 'BLOCKED' });
+}
+
 /** Fresh diagnosis revision. Changes plan hash => outstanding approvals/consent/schedules are invalidated. */
 function diagnose(tx: Tx, ticketId: string, reason: string, actor: Actor = SYSTEM) {
   const t = tx.ticket(ticketId);
+  cancelPausedExecution(tx, ticketId, `Plan changed: ${reason}`);
   if (t.status !== 'DIAGNOSING') tx.move(ticketId, 'DIAGNOSING', 'DIAGNOSIS_STARTED', reason, {}, actor);
   const prev = tx.s.diagnoses.filter((d) => d.ticketId === ticketId).reduce((m, d) => Math.max(m, d.revision), 0);
   const dev = tx.device(t.deviceId);
@@ -185,6 +224,13 @@ function startExecution(tx: Tx, ticketId: string) {
     ? { kind: 'APPROVAL', approvalId: g.approval.id, actor: g.approval.actor, role: g.approval.role, approvedAt: g.approval.at, policyVersion: g.approval.policyVersion, valid: true }
     : { kind: 'POLICY', policyVersion: tx.policy.version, decision: g.reasons[0], valid: g.autoEligible };
   if (!authorization.valid) throw new DomainError('UNAUTHORIZED', 'No valid approval or policy authorization at start');
+  // Re-validate every preflight prerequisite immediately before execution.
+  const pf = preflight(tx.s, ticketId, tx.now);
+  if (!pf.ok) {
+    tx.audit({ ticketId, action: 'PREFLIGHT_BLOCKED', reason: pf.blocking.map((c) => `${c.label}: ${c.detail}`).join('; '), metadata: { checks: pf.checks }, actor: SYSTEM, result: 'BLOCKED' });
+    throw new DomainError('BLOCKED', `Preflight blocked: ${pf.blocking.map((c) => c.label).join(', ')}`);
+  }
+  tx.audit({ ticketId, action: 'PREFLIGHT_PASSED', reason: preflightSummary(pf), metadata: { checks: pf.checks }, actor: SYSTEM });
   if (g.approval) tx.patchApproval(g.approval.id, { consumedBy: id });
   let scheduledDelayMin = 0;
   if (g.job) {
@@ -196,7 +242,7 @@ function startExecution(tx: Tx, ticketId: string) {
     id, ticketId, planHash: g.diagnosis.planHash, runbookId: g.runbook.id, version: g.runbook.version, path, startedAt: tx.nowIso, phase: 'RUNNING', stepIndex: 0,
     nextAt: iso(tx.now + tx.timing.stepMs), snapshot: { ...g.device }, results: [], outcome: t.outcome, verificationPassed: false, deviceId: t.deviceId,
     diagnosisRevision: g.diagnosis.revision, simOutcome: t.outcome, authorization, changes: [], reversible: g.runbook.reversible, risk: g.diagnosis.risk,
-    stepMs: tx.timing.stepMs, verifyMs: tx.timing.verifyMs, closeMs: tx.timing.closeMs, rollbackResults: [], verificationOutput: [],
+    stepMs: tx.timing.stepMs, verifyMs: tx.timing.verifyMs, closeMs: tx.timing.closeMs, rollbackResults: [], verificationOutput: [], preflight: pf.checks,
   };
   tx.addExecution(e);
   tx.patchTicket(ticketId, { path, executionIds: [...t.executionIds, id], scheduledDelayMin: t.scheduledDelayMin + scheduledDelayMin });
@@ -234,45 +280,70 @@ function stepExecution(tx: Tx, e0: Execution) {
   const act = SIM_ACTIONS[rb.actionKey!]!;
   const res = (line: string) => [...tx.exec(e.id).results, line];
 
-  const cancelIfBlocked = (stage: string): boolean => {
-    const why = !tx.policy.enabled ? 'Automation paused by policy' : !dev.online ? 'Device went offline' : dev.busy ? 'Device became busy' : null;
-    if (!why) return false;
-    tx.patchExecution(e.id, { phase: 'CANCELLED', endedAt: tx.nowIso, nextAt: undefined, cancelReason: why, results: res(`${stage}: stopped before mutation — ${why}`) });
+  const cancel = (stage: string, why: string, action = 'EXECUTION_CANCELLED') => {
+    tx.patchExecution(e.id, { phase: 'CANCELLED', endedAt: tx.nowIso, nextAt: undefined, stepScheduledFor: undefined, cancelReason: why, results: res(`${stage}: stopped before mutation — ${why}`) });
+    invalidateStepApprovals(tx, e.id, why);
     tx.patchTicket(e.ticketId, { reworks: t.reworks + 1 });
     const g = gatesFor(tx.s, e.ticketId, tx.now);
-    tx.move(e.ticketId, g.route, 'EXECUTION_CANCELLED', `${why}; no device change applied. ${g.reasons[g.reasons.length - 1]}`, { executionId: e.id }, SYSTEM, 'BLOCKED');
-    return true;
+    const to: Status = g.route === 'READY' ? 'REVIEW_REQUIRED' : g.route;
+    tx.move(e.ticketId, to, action, `${why}; no device change applied. ${to === g.route ? g.reasons[g.reasons.length - 1] : 'Human review required before retry'}`, { executionId: e.id }, SYSTEM, 'BLOCKED');
   };
 
   if (e.phase === 'RUNNING') {
-    if (e.stepIndex === 0) {
-      if (cancelIfBlocked('Preflight')) return;
-      if (e.simOutcome === 'EXEC_FAIL') {
-        tx.patchExecution(e.id, { results: res(`Step 1 · ${rb.steps[0]} — FAILED: simulated prerequisite check error; no change applied`) });
-        finishExecFailure(tx, tx.exec(e.id), 'EXEC_FAIL', 'Execution failed in preflight');
+    const sd = rb.stepDefs[e.stepIndex];
+    if (!sd) {
+      tx.patchExecution(e.id, { phase: 'VERIFYING', nextAt: iso(tx.now + e.verifyMs) });
+      tx.move(e.ticketId, 'VERIFYING', 'VERIFICATION_STARTED', `Checks: ${rb.checks.join('; ')}`, { executionId: e.id }, SYSTEM);
+      return;
+    }
+    const label = `Step ${sd.id} · ${sd.description}`;
+    if (!e.appliedAt) {
+      // Before any mutation: offline always stops; pause/busy stop upcoming change steps (read-only steps may continue).
+      const why = !dev.online ? 'Device went offline' : sd.type === 'ACTION' && !tx.policy.enabled ? 'Automation paused by policy' : sd.type === 'ACTION' && dev.busy ? 'Device became busy' : null;
+      if (why) { cancel(label, why); return; }
+    }
+    if (e.stepIndex === 0 && e.simOutcome === 'EXEC_FAIL') {
+      tx.patchExecution(e.id, { results: res(`${label} — FAILED: simulated prerequisite check error; no change applied`) });
+      finishExecFailure(tx, tx.exec(e.id), 'EXEC_FAIL', 'Execution failed before action');
+      return;
+    }
+    if (sd.approval === 'STEP') {
+      const sa = validStepApproval(tx.s, e, tx.now);
+      if (!sa) {
+        tx.patchExecution(e.id, { phase: 'AWAITING_STEP', nextAt: undefined, pausedStepId: sd.id, stepScheduledFor: undefined });
+        tx.move(e.ticketId, 'STEP_APPROVAL', 'STEP_APPROVAL_REQUIRED', `Paused at ${label} (${sd.risk} risk) — explicit ${sd.risk === 'HIGH' ? 'admin' : 'agent'} step approval required`, { executionId: e.id, stepId: sd.id, risk: sd.risk, dependsOn: sd.dependsOn }, SYSTEM, 'INFO');
+        tx.notify({ ticketId: e.ticketId, recipient: sd.risk === 'HIGH' ? 'ADMIN' : 'AGENT', message: `${t.displayId}: paused at high-impact step ${sd.id} — step approval required` });
         return;
       }
-      tx.patchExecution(e.id, { snapshot: { ...dev }, stepIndex: 1, nextAt: iso(tx.now + e.stepMs), results: res(`Step 1 · ${rb.steps[0]} — passed; snapshot captured`) });
-      tx.audit({ ticketId: e.ticketId, action: 'STEP_COMPLETED', reason: 'Preflight passed, snapshot captured', metadata: { executionId: e.id, step: 1 }, actor: SYSTEM });
-    } else if (e.stepIndex === 1) {
-      if (cancelIfBlocked('Action')) return;
+    }
+    if (sd.type === 'ACTION') {
+      const pf = preflight(tx.s, e.ticketId, tx.now, { execution: e });
+      if (!pf.ok) {
+        tx.audit({ ticketId: e.ticketId, action: 'PREFLIGHT_BLOCKED', reason: pf.blocking.map((c) => `${c.label}: ${c.detail}`).join('; '), metadata: { executionId: e.id, stepId: sd.id, checks: pf.checks }, actor: SYSTEM, result: 'BLOCKED' });
+        cancel(label, `Preflight re-validation failed (${pf.blocking.map((c) => c.label).join(', ')})`);
+        return;
+      }
+      tx.audit({ ticketId: e.ticketId, action: 'PREFLIGHT_REVALIDATED', reason: `Before ${sd.id}: ${preflightSummary(pf)}`, metadata: { executionId: e.id, stepId: sd.id, checks: pf.checks }, actor: SYSTEM });
+      const sa = validStepApproval(tx.s, e, tx.now);
+      if (sa) tx.patchStepApproval(sa.id, { usedAt: tx.nowIso });
       const patch = act.patch(dev);
       const changes = (Object.keys(patch) as (keyof Device)[]).filter((k) => patch[k] !== dev[k]).map((k) => ({ field: k, before: dev[k], after: patch[k] }));
       tx.patchDevice(dev.id, patch);
       const deadline = e.reversible ? iso(tx.now + 30 * MIN) : undefined;
-      tx.patchExecution(e.id, { changes, appliedAt: tx.nowIso, rollbackDeadline: deadline, stepIndex: 2, nextAt: iso(tx.now + e.stepMs), results: res(`Step 2 · ${rb.steps[1]} — applied: ${changes.map((c) => `${deviceFieldLabel(c.field)} ${String(c.before)} → ${String(c.after)}`).join(', ') || 'no field change needed'}`) });
-      tx.audit({ ticketId: e.ticketId, action: 'ACTION_APPLIED', reason: act.label, metadata: { executionId: e.id, changes, rollbackDeadline: deadline ?? 'not reversible' }, actor: SYSTEM });
-    } else {
-      tx.patchExecution(e.id, { phase: 'VERIFYING', stepIndex: 3, nextAt: iso(tx.now + e.verifyMs), results: res(`Step 3 · ${rb.steps[2]} — signals collected; running verification`) });
-      tx.move(e.ticketId, 'VERIFYING', 'VERIFICATION_STARTED', `Checks: ${rb.checks.join('; ')}`, { executionId: e.id }, SYSTEM);
+      tx.patchExecution(e.id, { changes, appliedAt: tx.nowIso, rollbackDeadline: deadline, stepIndex: e.stepIndex + 1, nextAt: iso(tx.now + e.stepMs), stepScheduledFor: undefined, results: res(`${label} — applied: ${changes.map((c) => `${deviceFieldLabel(c.field)} ${String(c.before)} → ${String(c.after)}`).join(', ') || 'no field change needed'}`) });
+      tx.audit({ ticketId: e.ticketId, action: 'ACTION_APPLIED', reason: `${sd.id}: ${act.label}`, metadata: { executionId: e.id, stepId: sd.id, changes, rollbackDeadline: deadline ?? 'not reversible' }, actor: SYSTEM });
+      return;
     }
+    const isSnapshot = sd.type === 'SNAPSHOT' || e.stepIndex === 0;
+    tx.patchExecution(e.id, { ...(isSnapshot ? { snapshot: { ...dev } } : {}), stepIndex: e.stepIndex + 1, nextAt: iso(tx.now + e.stepMs), results: res(`${label} — ${sd.type === 'DIAGNOSTIC' ? 'read-only, auto-executed' : 'snapshot captured'}: ${sd.expectedResult}`) });
+    tx.audit({ ticketId: e.ticketId, action: 'STEP_COMPLETED', reason: `${sd.id} ${sd.description} (${sd.type.toLowerCase()}, auto)`, metadata: { executionId: e.id, stepId: sd.id, type: sd.type }, actor: SYSTEM });
     return;
   }
   if (e.phase === 'VERIFYING') {
     const v = act.verify(dev);
     const pass = e.simOutcome === 'SUCCESS' && v.pass;
     const output = pass ? [`PASS · ${v.output}`] : [`FAIL · ${e.simOutcome === 'SUCCESS' ? v.output : act.failOutput}`];
-    tx.patchExecution(e.id, { verificationOutput: output, results: res(`Verification — ${output[0]}`) });
+    tx.patchExecution(e.id, { verificationOutput: output });
     if (!pass) { finishExecFailure(tx, tx.exec(e.id), e.simOutcome === 'SUCCESS' ? 'VERIFY_FAIL' : e.simOutcome, `Verification failed: ${output[0]}`); return; }
     const m = modeled(t, e.path, rb.expectedMin);
     tx.patchExecution(e.id, { phase: 'PASSED', outcome: 'SUCCESS', verificationPassed: true, endedAt: tx.nowIso, closurePending: true, nextAt: iso(tx.now + e.closeMs) });
@@ -368,7 +439,7 @@ export type Action =
   | { type: 'REJECT'; ticketId: string; reason: string }
   | { type: 'REQUEST_REVIEW'; ticketId: string; reason: string }
   | { type: 'CONSENT'; ticketId: string; grant: boolean }
-  | { type: 'SET_DEVICE'; ticketId: string; online?: boolean; busy?: boolean }
+  | { type: 'SET_DEVICE'; ticketId: string; online?: boolean; busy?: boolean; batteryPct?: number }
   | { type: 'ADVANCE_SCHEDULE'; ticketId: string }
   | { type: 'START'; ticketId: string }
   | { type: 'ROLLBACK'; ticketId: string }
@@ -383,6 +454,16 @@ export type Action =
   | { type: 'PUBLISH_RUNBOOK'; runbookId: string; version: number; note: string }
   | { type: 'NEW_VERSION'; runbookId: string }
   | { type: 'RETIRE_RUNBOOK'; runbookId: string; version: number; reason: string }
+  | { type: 'APPROVE_STEP'; ticketId: string; scheduleAt?: string; impactConfirmed?: boolean }
+  | { type: 'REJECT_STEP'; ticketId: string; reason: string }
+  | { type: 'ADVANCE_STEP'; ticketId: string }
+  | { type: 'EMPLOYEE_RESPOND'; ticketId: string; choice: EmployeeChoice; windowAt?: string; note?: string }
+  | { type: 'LINK_SHARED'; ticketIds: string[] }
+  | { type: 'VERIFY_RECOVERY'; ticketId: string }
+  | { type: 'SUBMIT_REVIEW'; runbookId: string; version: number }
+  | { type: 'RETURN_TO_DRAFT'; runbookId: string; version: number; reason: string }
+  | { type: 'SET_MATURITY'; runbookId: string; version: number; to: Maturity; reason: string }
+  | { type: 'UPDATE_ASSUMPTIONS'; assumptions: Assumptions }
   | { type: 'MARK_NOTIFICATIONS_READ' }
   | { type: 'SET_ROLE'; role: Role };
 
@@ -407,7 +488,7 @@ function createTicket(tx: Tx, input: CreateTicketInput): string {
     const n = tx.s.seq.device + 1;
     tx.s.seq = { ...tx.s.seq, device: n };
     const os = input.newDevice?.os ?? 'Windows 11';
-    device = { ...HEALTHY_DEVICE, ...symptomFor(category), ...input.newDevice, id: uuid(), name: `${os === 'macOS' ? 'LT-MAC' : 'LT-W11'}-${String(n).padStart(4, '0')}`, os } as Device;
+    device = { ...HEALTHY_DEVICE, networkId: `HOME-${String(n).padStart(4, '0')}`, ...symptomFor(category), ...input.newDevice, id: uuid(), name: `${os === 'macOS' ? 'LT-MAC' : 'LT-W11'}-${String(n).padStart(4, '0')}`, os } as Device;
     tx.putDevice(device);
   }
   const seq = tx.s.seq.ticket + 1;
@@ -418,7 +499,7 @@ function createTicket(tx: Tx, input: CreateTicketInput): string {
     id, displayId: `INC-${1000 + seq}`, title, description, requester: input.requester, deviceId: device.id, source: input.source, category, priority: input.priority,
     status: 'OPEN', createdAt: tx.nowIso, updatedAt: tx.nowIso, owner: input.owner ?? 'Alex', eligibleAtIntake: false, intakePolicyVersion: tx.policy.version,
     baselineAgentMin: b.agentMin, baselineResolutionMin: b.resolutionMin, agentMin: 0, verified: false, reopenedCount: 0, outcome: input.outcome, executionIds: [],
-    eligibilityReason: '', scenario: input.scenario ?? (input.category === 'CUSTOM' ? 'CUSTOM' : undefined), addedEvidence: [], reviewDecisions: 0, recoveries: 0, reworks: 0, scheduledDelayMin: 0, demo: input.demo,
+    eligibilityReason: '', slaDueAt: iso(tx.now + SLA_HOURS[input.priority] * 60 * MIN), scenario: input.scenario ?? (input.category === 'CUSTOM' ? 'CUSTOM' : undefined), addedEvidence: [], reviewDecisions: 0, recoveries: 0, reworks: 0, scheduledDelayMin: 0, demo: input.demo,
   };
   tx.s.tickets = { ...tx.s.tickets, [id]: t };
   tx.audit({ ticketId: id, action: 'TICKET_CREATED', to: 'OPEN', reason: `${input.source === 'DETECTION' ? 'Proactive detection' : 'Employee report'}: ${title}`, metadata: {
@@ -467,10 +548,131 @@ function approve(tx: Tx, a: Extract<Action, { type: 'APPROVE' }>) {
   return after.route === 'READY' ? 'Approved — execution started' : after.route === 'AWAITING_CONSENT' ? 'Approved — employee consent requested' : after.route === 'SCHEDULED' ? 'Approved — scheduled' : `Approved — ${STATUS_LABEL[after.route]}`;
 }
 
+function employeeRespond(tx: Tx, a: Extract<Action, { type: 'EMPLOYEE_RESPOND' }>): string {
+  notManager(tx);
+  const t = tx.ticket(a.ticketId);
+  req(t.status === 'AWAITING_CONSENT', 'ILLEGAL_TRANSITION', 'No consent request is pending');
+  const d = currentDiagnosis(tx.s, t)!;
+  const emp = employeeOf(t);
+  let windowAt: number | undefined;
+  if (a.choice === 'SCHEDULE') {
+    windowAt = a.windowAt ? ms(a.windowAt) : NaN;
+    req(Number.isFinite(windowAt) && windowAt! >= tx.now + MIN - 1000 && windowAt! <= tx.now + DAY, 'VALIDATION', 'Choose a maintenance window between now + 1 minute and now + 24 hours');
+  }
+  tx.patchTicket(t.id, { employeeResponse: { choice: a.choice, at: tx.nowIso, windowAt: windowAt ? iso(windowAt) : undefined, note: a.note?.trim() || undefined, planHash: d.planHash } });
+  tx.audit({ ticketId: t.id, action: 'EMPLOYEE_RESPONSE', reason: `Employee chose: ${{ PROCEED: 'proceed now', SCHEDULE: `maintenance window ${windowAt ? iso(windowAt) : ''}`, DECLINE: 'decline', ASSIST: 'request IT assistance' }[a.choice]} (simulated)`, metadata: { choice: a.choice, windowAt: windowAt ? iso(windowAt) : undefined, note: a.note, planHash: d.planHash }, actor: emp, result: 'INFO' });
+  if (a.choice === 'PROCEED' || a.choice === 'SCHEDULE') {
+    const expires = Math.max(tx.now + DAY, (windowAt ?? 0) + tx.policy.approvalTTLMin * MIN);
+    tx.patchTicket(t.id, { consent: { granted: true, at: tx.nowIso, expiresAt: iso(expires), planHash: d.planHash } });
+    tx.audit({ ticketId: t.id, action: 'CONSENT_GRANTED', reason: `Employee granted consent${windowAt ? ' for a selected maintenance window' : ' to proceed now'} (simulated)`, metadata: { planHash: d.planHash, expiresAt: iso(expires) }, actor: emp });
+    if (windowAt !== undefined) {
+      for (const j of tx.s.jobs) if (j.ticketId === t.id && j.status === 'PENDING') tx.patchJob(j.id, { status: 'CANCELLED' });
+      tx.addJob({ id: uuid(), ticketId: t.id, dueAt: iso(windowAt), originalDueAt: iso(windowAt), planHash: d.planHash, status: 'PENDING', createdAt: tx.nowIso });
+      const appr = validApproval(tx.s, t, d, tx.now);
+      const needed = windowAt + tx.policy.approvalTTLMin * MIN;
+      if (appr && ms(appr.expiresAt) < needed) {
+        tx.patchApproval(appr.id, { expiresAt: iso(needed), scheduledFor: iso(windowAt) });
+        tx.audit({ ticketId: t.id, action: 'APPROVAL_WINDOW_ALIGNED', reason: `Approval by ${appr.actor} aligned to the employee-selected window (same plan, policy and action)`, metadata: { approvalId: appr.id, expiresAt: iso(needed) }, actor: SYSTEM, result: 'INFO' });
+      }
+    }
+    const g = gatesFor(tx.s, t.id, tx.now);
+    if (g.route !== t.status) tx.move(t.id, g.route, 'GATES_REEVALUATED', g.reasons[g.reasons.length - 1], { gateReasons: g.reasons }, SYSTEM);
+    tx.notify({ ticketId: t.id, recipient: 'AGENT', message: `${t.displayId}: employee ${windowAt ? `scheduled a window (${new Date(windowAt).toLocaleString()})` : 'consented to proceed now'}` });
+    return g.route === 'READY' ? 'Consent granted — execution starting' : `Consent recorded — ${STATUS_LABEL[g.route]}`;
+  }
+  if (a.choice === 'DECLINE') {
+    tx.patchTicket(t.id, { consent: { granted: false, at: tx.nowIso, expiresAt: tx.nowIso, planHash: d.planHash } });
+    tx.move(t.id, 'ESCALATED', 'CONSENT_DENIED', 'Employee declined consent (simulated) — escalated', { planHash: d.planHash }, emp, 'BLOCKED');
+  } else {
+    tx.move(t.id, 'ESCALATED', 'EMPLOYEE_REQUESTED_ASSISTANCE', `Employee requested IT assistance instead of automated remediation${a.note ? `: ${a.note.trim()}` : ''} (simulated)`, { planHash: d.planHash }, emp, 'INFO');
+  }
+  invalidateApprovals(tx, t.id, a.choice === 'DECLINE' ? 'Consent denied' : 'Employee requested IT assistance');
+  cancelJobs(tx, t.id, a.choice === 'DECLINE' ? 'Consent denied' : 'Employee requested IT assistance');
+  tx.notify({ ticketId: t.id, recipient: 'AGENT', message: `${t.displayId}: employee ${a.choice === 'DECLINE' ? 'declined consent' : 'requested IT assistance'} — escalated to you` });
+  return a.choice === 'DECLINE' ? 'Consent denied — ticket escalated' : 'IT assistance requested — ticket escalated';
+}
+
+function approveStep(tx: Tx, a: Extract<Action, { type: 'APPROVE_STEP' }>): string {
+  notManager(tx);
+  const t = tx.ticket(a.ticketId);
+  const e = pausedExecution(tx.s, t.id);
+  req(t.status === 'STEP_APPROVAL' && e && e.phase === 'AWAITING_STEP', 'ILLEGAL_TRANSITION', 'No step is awaiting approval');
+  const rb = runbookOf(tx.s, e!)!;
+  const sd = rb.stepDefs[e!.stepIndex];
+  req(rb.status === 'APPROVED' && isExecutable(rb), 'BLOCKED', `${rb.id} v${rb.version} is no longer approved — the plan must be re-diagnosed`);
+  const perm = canRoleApprove(tx.user.role as Role, sd.risk);
+  req(perm.ok, 'UNAUTHORIZED', perm.reason === 'HIGH-risk plans require an Admin approver' ? `Step ${sd.id} is HIGH risk and requires an Admin step approver` : perm.reason ?? 'Not permitted');
+  if (sd.risk === 'HIGH') req(a.impactConfirmed, 'VALIDATION', 'Confirm the step impact before approving a HIGH-risk step');
+  let due: number | undefined;
+  if (a.scheduleAt) {
+    due = ms(a.scheduleAt);
+    req(Number.isFinite(due) && due >= tx.now + MIN - 1000 && due <= tx.now + DAY, 'VALIDATION', 'Schedule must be between now + 1 minute and now + 24 hours');
+  }
+  const pf = preflight(tx.s, t.id, tx.now, { execution: e! });
+  const blocking = pf.blocking.filter((c) => c.key !== 'auth' && c.key !== 'window');
+  if (blocking.length) throw new DomainError('BLOCKED', `Preflight blocks this step: ${blocking.map((c) => `${c.label} (${c.detail})`).join('; ')}`);
+  const sa: StepApproval = {
+    id: uuid(), ticketId: t.id, executionId: e!.id, stepId: sd.id, deviceId: e!.deviceId, actionKey: rb.actionKey ?? '', runbookId: rb.id, runbookVersion: rb.version, planHash: e!.planHash,
+    actor: tx.user.name, role: tx.user.role as Role, decision: 'APPROVE', at: tx.nowIso, expiresAt: iso(Math.max(tx.now, due ?? 0) + tx.policy.approvalTTLMin * MIN), scheduledFor: due ? iso(due) : undefined,
+  };
+  tx.addStepApproval(sa);
+  tx.patchExecution(e!.id, { phase: 'RUNNING', nextAt: due ? iso(due) : tx.nowIso, stepScheduledFor: due ? iso(due) : undefined, pausedStepId: undefined });
+  tx.move(t.id, 'EXECUTING', 'STEP_APPROVED', `Step ${sd.id} (${sd.description}) approved${due ? ` for ${iso(due)}` : ' — resuming'}; preflight re-checked before the action`, {
+    stepApprovalId: sa.id, executionId: e!.id, stepId: sd.id, scope: { ticket: t.displayId, device: e!.deviceId, action: sa.actionKey, runbook: `${rb.id} v${rb.version}`, planHash: sa.planHash }, expiresAt: sa.expiresAt, impactConfirmed: !!a.impactConfirmed,
+  });
+  return due ? `Step ${sd.id} approved and scheduled` : `Step ${sd.id} approved — resuming`;
+}
+
+function linkShared(tx: Tx, ids: string[]): string {
+  notManager(tx);
+  req(ids.length >= 2, 'VALIDATION', 'Select at least two incidents to link');
+  const kids = ids.map((id) => tx.ticket(id));
+  req(kids.every((k) => !k.parentId && !k.isParent), 'DUPLICATE', 'One or more incidents are already linked');
+  req(kids.every((k) => k.status !== 'RESOLVED' && k.status !== 'CLOSED'), 'BLOCKED', 'Only open incidents can be linked');
+  const nets = new Set(kids.map((k) => tx.device(k.deviceId).networkId));
+  req(nets.size === 1, 'VALIDATION', 'Linked incidents must share a network identifier');
+  const networkId = [...nets][0];
+  const loc = tx.device(kids[0].deviceId).location;
+  const n = tx.s.seq.device + 1;
+  tx.s.seq = { ...tx.s.seq, device: n };
+  const seg: Device = { ...HEALTHY_DEVICE, id: uuid(), name: `${networkId} network segment`, kind: 'NETWORK_SEGMENT', managed: false, location: loc, networkId, wifiHealthy: false };
+  tx.putDevice(seg);
+  const seq = tx.s.seq.ticket + 1;
+  tx.s.seq = { ...tx.s.seq, ticket: seq };
+  const id = uuid();
+  const cat = kids[0].category;
+  const b = BASELINES[cat];
+  const parent: Ticket = {
+    id, displayId: `INC-${1000 + seq}`, title: `Shared incident: ${CATEGORY_LABEL[cat]} on ${networkId} (${kids.length} reports)`, description: `Correlated ${kids.length} reports from ${new Set(kids.map((k) => k.requester)).size} employees at ${loc} on network ${networkId}: ${kids.map((k) => k.displayId).join(', ')}.`,
+    requester: 'Network operations (simulated)', deviceId: seg.id, source: 'DETECTION', category: cat, priority: 'P2', status: 'OPEN', createdAt: tx.nowIso, updatedAt: tx.nowIso, owner: tx.user.name,
+    eligibleAtIntake: false, intakePolicyVersion: tx.policy.version, baselineAgentMin: b.agentMin, baselineResolutionMin: b.resolutionMin, agentMin: 0, verified: false, reopenedCount: 0, outcome: 'SUCCESS', executionIds: [],
+    eligibilityReason: 'Shared network incident — no endpoint remediation', addedEvidence: [], reviewDecisions: 0, recoveries: 0, reworks: 0, scheduledDelayMin: 0, slaDueAt: iso(tx.now + SLA_HOURS.P2 * 60 * MIN),
+    isParent: true, childIds: ids, demo: kids.some((k) => k.demo),
+  };
+  tx.s.tickets = { ...tx.s.tickets, [id]: parent };
+  tx.audit({ ticketId: id, action: 'SHARED_INCIDENT_CREATED', to: 'OPEN', reason: `Parent incident created from ${kids.length} correlated reports on ${networkId}`, metadata: { children: kids.map((k) => k.displayId), networkId, location: loc } });
+  tx.move(id, 'ESCALATED', 'ESCALATED', 'Shared network incident — investigate the network segment; endpoint remediation for linked incidents is paused');
+  for (const k of kids) {
+    tx.patchTicket(k.id, { parentId: id });
+    const hold = holdReasonFor(tx.s, tx.ticket(k.id))!;
+    tx.audit({ ticketId: k.id, action: 'INCIDENT_LINKED', reason: `Linked to shared incident ${parent.displayId}`, metadata: { parentId: id }, result: 'INFO' });
+    if (GATE_STATES.includes(k.status) || k.status === 'STEP_APPROVAL') {
+      cancelPausedExecution(tx, k.id, 'Linked to shared incident');
+      invalidateApprovals(tx, k.id, 'Linked to shared incident — endpoint remediation paused');
+      cancelJobs(tx, k.id, 'Linked to shared incident');
+      tx.move(k.id, 'REVIEW_REQUIRED', 'REMEDIATION_HELD', hold, { parentId: id }, SYSTEM, 'BLOCKED');
+    } else if (RUNNING_STATES.includes(k.status)) {
+      tx.audit({ ticketId: k.id, action: 'REMEDIATION_HELD', reason: 'Already executing — not interrupted mid-action (no unsafe cancellation)', metadata: { parentId: id }, actor: SYSTEM, result: 'INFO' });
+    }
+  }
+  (tx as Tx & { createdId?: string }).createdId = id;
+  return `${parent.displayId} created; ${kids.length} incidents linked and endpoint remediation paused`;
+}
+
 function policyAffected(s: AppState, next: Policy) {
   const ids: string[] = [];
   for (const t of Object.values(s.tickets)) {
-    if (GATE_STATES.includes(t.status)) { ids.push(t.id); continue; }
+    if (GATE_STATES.includes(t.status) || t.status === 'STEP_APPROVAL') { ids.push(t.id); continue; }
     if (t.status === 'REVIEW_REQUIRED') {
       const d = currentDiagnosis(s, t);
       if (!d || d.recommendedRoute !== 'REVIEW_REQUIRED') continue;
@@ -502,6 +704,11 @@ function savePolicy(tx: Tx, next: Omit<Policy, 'version'>, reason: string, actio
   tx.s.policyHistory = [...tx.s.policyHistory, { policy: p, reason: reason.trim(), actor: tx.user.name, role: tx.user.role, at: tx.nowIso }];
   const diff = (Object.keys(p) as (keyof Policy)[]).filter((k) => JSON.stringify(p[k]) !== JSON.stringify(prev[k])).map((k) => ({ field: k, before: prev[k], after: p[k] }));
   tx.audit({ action, reason: reason.trim(), metadata: { policyVersion: version, previousVersion: prev.version, diff, affectedTickets: affected.length } });
+  for (const t of Object.values(tx.s.tickets)) if (t.status === 'EXECUTING' && pausedExecution(tx.s, t.id)) {
+    cancelPausedExecution(tx, t.id, `Policy v${version} saved — scheduled step approval no longer bound to current policy`);
+    tx.move(t.id, 'REVIEW_REQUIRED', 'REMEDIATION_HELD', `Policy v${version} changed before the scheduled step ran`, {}, SYSTEM, 'BLOCKED');
+    affected.push(t.id);
+  }
   for (const id of affected) diagnose(tx, id, `Policy v${version} saved — re-evaluating`);
   return `Policy v${version} saved; ${affected.length} ticket(s) re-evaluated`;
 }
@@ -512,7 +719,14 @@ function invalidateRunbookPlans(tx: Tx, rb: Runbook, why: string) {
     if (!d) continue;
     const refs = d.runbookId === rb.id || d.category === rb.category;
     if (!refs) continue;
-    if (GATE_STATES.includes(t.status) || (t.status === 'REVIEW_REQUIRED' && d.recommendedRoute === 'REVIEW_REQUIRED' && !d.runbookId)) diagnose(tx, t.id, why);
+    if (t.status === 'EXECUTING' && pausedExecution(tx.s, t.id)) {
+      // Approved step scheduled but not yet applied: changing the approved action invalidates it.
+      cancelPausedExecution(tx, t.id, why);
+      tx.move(t.id, 'REVIEW_REQUIRED', 'REMEDIATION_HELD', `${why} — scheduled step will not run`, {}, SYSTEM, 'BLOCKED');
+      diagnose(tx, t.id, why);
+      continue;
+    }
+    if (GATE_STATES.includes(t.status) || t.status === 'STEP_APPROVAL' || (t.status === 'REVIEW_REQUIRED' && d.recommendedRoute === 'REVIEW_REQUIRED' && !d.runbookId && !t.parentId)) diagnose(tx, t.id, why);
   }
 }
 
@@ -529,7 +743,7 @@ function validateRunbook(rb: Runbook): string[] {
     if (!SIM_ACTIONS[rb.actionKey]) errs.push('Unknown action — cannot be executable');
     else if (rb.actionKey !== rb.category) errs.push(`Simulator action ${rb.actionKey} does not match category ${rb.category}; publish as diagnostic-only instead`);
   }
-  if (rb.preapproved && (rb.risk !== 'LOW' || rb.disruptive || !rb.actionKey)) errs.push('Only LOW-risk, non-disruptive executable runbooks may be preapproved');
+  if (!rb.stepDefs.length) errs.push('Structured steps are required');
   return errs;
 }
 export { validateRunbook };
@@ -578,24 +792,92 @@ function act(tx: Tx, a: Action): string | void {
       cancelJobs(tx, t.id, 'Plan rejected/sent to review');
       return a.type === 'REJECT' ? 'Plan rejected — ticket escalated' : 'Sent to review';
     }
-    case 'CONSENT': {
+    case 'CONSENT': return employeeRespond(tx, { type: 'EMPLOYEE_RESPOND', ticketId: a.ticketId, choice: a.grant ? 'PROCEED' : 'DECLINE' });
+    case 'EMPLOYEE_RESPOND': return employeeRespond(tx, a);
+    case 'APPROVE_STEP': return approveStep(tx, a);
+    case 'REJECT_STEP': {
       notManager(tx);
       const t = tx.ticket(a.ticketId);
-      req(t.status === 'AWAITING_CONSENT', 'ILLEGAL_TRANSITION', 'No consent request is pending');
-      const d = currentDiagnosis(tx.s, t)!;
-      const emp = employeeOf(t);
-      if (a.grant) {
-        tx.patchTicket(t.id, { consent: { granted: true, at: tx.nowIso, expiresAt: iso(tx.now + DAY), planHash: d.planHash } });
-        tx.audit({ ticketId: t.id, action: 'CONSENT_GRANTED', reason: 'Employee granted consent (simulated)', metadata: { planHash: d.planHash, expiresAt: iso(tx.now + DAY) }, actor: emp });
-        const g = gatesFor(tx.s, t.id, tx.now);
-        if (g.route !== t.status) tx.move(t.id, g.route, 'GATES_REEVALUATED', g.reasons[g.reasons.length - 1], { gateReasons: g.reasons }, SYSTEM);
-        return g.route === 'READY' ? 'Consent granted — execution starting' : `Consent granted — ${STATUS_LABEL[g.route]}`;
+      const e = pausedExecution(tx.s, t.id);
+      req(t.status === 'STEP_APPROVAL' && e, 'ILLEGAL_TRANSITION', 'No step is awaiting approval');
+      req(a.reason.trim().length >= 3, 'VALIDATION', 'A reason is required');
+      const rb = runbookOf(tx.s, e!)!;
+      const sd = rb.stepDefs[e!.stepIndex];
+      tx.addStepApproval({ id: uuid(), ticketId: t.id, executionId: e!.id, stepId: sd.id, deviceId: e!.deviceId, actionKey: rb.actionKey ?? '', runbookId: rb.id, runbookVersion: rb.version, planHash: e!.planHash, actor: tx.user.name, role: tx.user.role as Role, decision: 'REJECT', reason: a.reason.trim(), at: tx.nowIso, expiresAt: tx.nowIso });
+      cancelPausedExecution(tx, t.id, `Step ${sd.id} rejected by ${tx.user.name}`);
+      tx.patchTicket(t.id, { reviewDecisions: t.reviewDecisions + 1 });
+      tx.move(t.id, 'ESCALATED', 'STEP_REJECTED', `Step ${sd.id} rejected: ${a.reason.trim()}`, { executionId: e!.id, stepId: sd.id });
+      return `Step ${sd.id} rejected — escalated`;
+    }
+    case 'ADVANCE_STEP': {
+      notManager(tx);
+      const t = tx.ticket(a.ticketId);
+      const e = pausedExecution(tx.s, t.id);
+      req(e && e.phase === 'RUNNING' && e.stepScheduledFor, 'ILLEGAL_TRANSITION', 'No scheduled step to advance');
+      tx.patchExecution(e!.id, { nextAt: tx.nowIso, stepScheduledFor: tx.nowIso });
+      tx.audit({ ticketId: t.id, action: 'STEP_SCHEDULE_ADVANCED', reason: 'Demo: scheduled step advanced to now; preflight re-validated before the action (no bypass)', metadata: { executionId: e!.id, originalWindow: e!.stepScheduledFor }, result: 'INFO' });
+      return 'Scheduled step advanced';
+    }
+    case 'LINK_SHARED': return linkShared(tx, a.ticketIds);
+    case 'VERIFY_RECOVERY': {
+      notManager(tx);
+      const t = tx.ticket(a.ticketId);
+      const parent = t.parentId ? tx.s.tickets[t.parentId] : undefined;
+      req(parent && (parent.status === 'RESOLVED' || parent.status === 'CLOSED'), 'BLOCKED', 'The shared parent incident must be resolved first');
+      req(t.status === 'REVIEW_REQUIRED' || t.status === 'ESCALATED', 'ILLEGAL_TRANSITION', `Recovery verification is available from Review required or Escalated, not ${STATUS_LABEL[t.status]}`);
+      const dev = tx.device(t.deviceId);
+      const probe = telemetryFor(t.category, dev);
+      req(!probe.consistent, 'BLOCKED', `Read-only probe still shows the symptom (${probe.evidence[0]}); not resolved`);
+      const m = modeled(t, 'MANUAL', 0);
+      tx.patchTicket(t.id, { path: 'MANUAL', verified: true, resolutionNote: `Recovered via shared incident ${parent!.displayId}`, manualEvidence: `Read-only probe: ${probe.evidence[0]}`, resolvedAt: tx.nowIso, firstResolvedAt: t.firstResolvedAt ?? tx.nowIso, ...m });
+      tx.move(t.id, 'RESOLVED', 'RECOVERY_VERIFIED', `Verified recovery after shared incident ${parent!.displayId}: ${probe.evidence[0]}`, { parentId: parent!.id, probe: probe.evidence });
+      if (tx.policy.closureMode === 'AUTO') { tx.patchTicket(t.id, { closedAt: tx.nowIso }); tx.move(t.id, 'CLOSED', 'TICKET_CLOSED', 'Closed after verified recovery', { closureMode: 'AUTO' }, SYSTEM); }
+      tx.notify({ ticketId: t.id, recipient: 'EMPLOYEE', message: `${t.displayId}: connectivity restored (shared fix ${parent!.displayId}) and verified.` });
+      return 'Recovery verified';
+    }
+    case 'SUBMIT_REVIEW': {
+      notManager(tx);
+      const rb = runbookAt(tx, a.runbookId, a.version);
+      req(rb.status === 'DRAFT', 'BLOCKED', 'Only drafts can be submitted for review');
+      const errs = validateRunbook(rb);
+      req(!errs.length, 'VALIDATION', errs.join('; '));
+      replaceRunbook(tx, { ...rb, status: 'UNDER_REVIEW', submittedBy: tx.user.name, submittedAt: tx.nowIso });
+      tx.audit({ action: 'RUNBOOK_SUBMITTED', reason: `${rb.id} v${rb.version} submitted for administrator review`, metadata: { runbook: rb.id, version: rb.version } });
+      return `${rb.id} v${rb.version} submitted for review`;
+    }
+    case 'RETURN_TO_DRAFT': {
+      adminOnly(tx);
+      const rb = runbookAt(tx, a.runbookId, a.version);
+      req(rb.status === 'UNDER_REVIEW', 'BLOCKED', 'Only runbooks under review can be returned');
+      req(a.reason.trim().length >= 3, 'VALIDATION', 'A reason is required');
+      replaceRunbook(tx, { ...rb, status: 'DRAFT' });
+      tx.audit({ action: 'RUNBOOK_RETURNED', reason: a.reason.trim(), metadata: { runbook: rb.id, version: rb.version } });
+      return 'Returned to draft';
+    }
+    case 'SET_MATURITY': {
+      adminOnly(tx);
+      const rb = runbookAt(tx, a.runbookId, a.version);
+      req(rb.status === 'APPROVED' && isExecutable(rb), 'BLOCKED', 'Maturity applies to approved executable runbooks');
+      req(a.to >= 2 && a.to <= 4 && a.to !== rb.maturity, 'VALIDATION', 'Choose a different level between L2 and L4');
+      req(a.reason.trim().length >= 3, 'VALIDATION', 'Document the reason for this maturity change');
+      if (a.to > rb.maturity) {
+        req(a.to === rb.maturity + 1, 'VALIDATION', 'Promote one level at a time');
+        const unmet = maturityCriteria(tx.s, rb, a.to).filter((c) => !c.met);
+        req(!unmet.length, 'BLOCKED', `Eligibility criteria not met: ${unmet.map((c) => c.label).join('; ')}`);
       }
-      tx.patchTicket(t.id, { consent: { granted: false, at: tx.nowIso, expiresAt: tx.nowIso, planHash: d.planHash } });
-      tx.move(t.id, 'ESCALATED', 'CONSENT_DENIED', 'Employee denied consent (simulated) — escalated', { planHash: d.planHash }, emp, 'BLOCKED');
-      invalidateApprovals(tx, t.id, 'Consent denied');
-      cancelJobs(tx, t.id, 'Consent denied');
-      return 'Consent denied — ticket escalated';
+      replaceRunbook(tx, { ...rb, maturity: a.to, maturityHistory: [...rb.maturityHistory, { from: rb.maturity, to: a.to, at: tx.nowIso, actor: tx.user.name, reason: a.reason.trim() }] });
+      tx.audit({ action: 'MATURITY_CHANGED', reason: `${rb.id} v${rb.version}: ${MATURITY_LABEL[rb.maturity]} → ${MATURITY_LABEL[a.to]} — ${a.reason.trim()}`, metadata: { runbook: rb.id, version: rb.version, from: rb.maturity, to: a.to } });
+      return `${rb.id} now ${MATURITY_LABEL[a.to]}`;
+    }
+    case 'UPDATE_ASSUMPTIONS': {
+      req(tx.user.role === 'ADMIN' || tx.user.role === 'MANAGER', 'UNAUTHORIZED', 'Admin or Manager role required to change analytics assumptions');
+      const as = a.assumptions;
+      const nums = [as.hourlyCost, ...Object.values(as.baselines).flatMap((b) => [b.agentMin, b.resolutionMin])];
+      req(nums.every((n) => Number.isFinite(n) && n >= 0 && n <= 100000), 'VALIDATION', 'Assumptions must be non-negative numbers');
+      tx.s.settings = { ...tx.s.settings, assumptions: { ...as, updatedAt: tx.nowIso, updatedBy: tx.user.name } };
+      tx.dirty = true;
+      tx.audit({ action: 'ASSUMPTIONS_UPDATED', reason: `Estimate assumptions updated (hourly cost ${as.currency} ${as.hourlyCost})`, metadata: { hourlyCost: as.hourlyCost }, result: 'INFO' });
+      return 'Assumptions saved — estimates recalculated';
     }
     case 'SET_DEVICE': {
       notManager(tx);
@@ -604,8 +886,9 @@ function act(tx: Tx, a: Action): string | void {
       const patch: Partial<Device> = {};
       if (a.online !== undefined) patch.online = a.online;
       if (a.busy !== undefined) patch.busy = a.busy;
+      if (a.batteryPct !== undefined) patch.batteryPct = Math.max(0, Math.min(100, Math.round(a.batteryPct)));
       tx.patchDevice(dev.id, patch);
-      tx.audit({ ticketId: t.id, action: a.online === true ? 'DEVICE_RECONNECTED' : 'DEVICE_STATE_CHANGED', reason: `Simulated: ${a.online !== undefined ? `management channel ${a.online ? 'online' : 'offline'}` : ''}${a.busy !== undefined ? `employee ${a.busy ? 'busy' : 'available'}` : ''}`, metadata: { device: dev.name, ...patch }, result: 'INFO' });
+      tx.audit({ ticketId: t.id, action: a.online === true ? 'DEVICE_RECONNECTED' : 'DEVICE_STATE_CHANGED', reason: `Simulated: ${[a.online !== undefined && `management channel ${a.online ? 'online' : 'offline'}`, a.busy !== undefined && `employee ${a.busy ? 'busy' : 'available'}`, a.batteryPct !== undefined && `battery ${a.batteryPct}%`].filter(Boolean).join(', ')}`, metadata: { device: dev.name, ...patch }, result: 'INFO' });
       for (const other of Object.values(tx.s.tickets)) if (other.deviceId === dev.id) reroute(tx, other.id, 'Device state changed');
       return `Device ${dev.name} updated; gates re-evaluated`;
     }
@@ -662,6 +945,7 @@ function act(tx: Tx, a: Action): string | void {
       const t = tx.ticket(a.ticketId);
       req(ESCALATABLE.includes(t.status), 'ILLEGAL_TRANSITION', `Cannot escalate from ${STATUS_LABEL[t.status]}${RUNNING_STATES.includes(t.status) ? ' — no unsafe cancellation mid-action' : ''}`);
       req(a.reason.trim().length >= 3, 'VALIDATION', 'A reason is required');
+      cancelPausedExecution(tx, t.id, 'Manually escalated');
       tx.move(t.id, 'ESCALATED', 'ESCALATED', a.reason.trim());
       invalidateApprovals(tx, t.id, 'Manually escalated');
       cancelJobs(tx, t.id, 'Manually escalated');
@@ -682,7 +966,16 @@ function act(tx: Tx, a: Action): string | void {
         tx.move(t.id, 'CLOSED', 'TICKET_CLOSED', 'Closed after human-verified manual resolution', { closureMode: 'AUTO' }, SYSTEM);
       }
       tx.notify({ ticketId: t.id, recipient: 'EMPLOYEE', message: `${t.displayId} was resolved by ${tx.user.name}.` });
-      return 'Resolved manually';
+      if (t.isParent) {
+        const field: keyof Device | undefined = t.category === 'WIFI' ? 'wifiHealthy' : t.category === 'DNS' ? 'dnsHealthy' : undefined;
+        for (const cid of t.childIds ?? []) {
+          const c = tx.ticket(cid);
+          if (field) tx.patchDevice(c.deviceId, { [field]: true } as Partial<Device>);
+          tx.audit({ ticketId: cid, action: 'NETWORK_RECOVERY_OBSERVED', reason: `Shared fix ${t.displayId} completed; endpoint telemetry ${field ? `${deviceFieldLabel(field)} = true` : 'unchanged'} (simulated). Not closed until recovery is verified.`, metadata: { parentId: t.id }, actor: SYSTEM, result: 'INFO' });
+          tx.notify({ ticketId: cid, recipient: 'AGENT', message: `${c.displayId}: shared incident ${t.displayId} resolved — verify recovery` });
+        }
+      }
+      return t.isParent ? 'Shared incident resolved — verify recovery on linked incidents' : 'Resolved manually';
     }
     case 'SAVE_POLICY': return savePolicy(tx, a.policy, a.reason);
     case 'RESTORE_DEFAULT_POLICY': {
@@ -691,7 +984,7 @@ function act(tx: Tx, a: Action): string | void {
     }
     case 'PROPOSE_DRAFT': {
       notManager(tx);
-      let category: Category, steps: string[], checks: string[], src: string[], title: string;
+      let category: Category, steps: string[], checks: string[], src: string[], title: string, rootCause: string;
       if (a.fromTicketId) {
         const t = tx.ticket(a.fromTicketId);
         req(t.path === 'MANUAL' && (t.status === 'RESOLVED' || t.status === 'CLOSED'), 'BLOCKED', 'Drafts can be proposed from manually resolved tickets');
@@ -701,6 +994,7 @@ function act(tx: Tx, a: Action): string | void {
         checks = [t.manualEvidence ?? 'Human-verified outcome'];
         src = [t.id];
         title = `Draft from ${t.displayId}: ${t.title}`;
+        rootCause = `Recorded resolution of ${t.displayId}: ${t.resolutionNote ?? 'n/a'}`;
       } else {
         req(a.category, 'VALIDATION', 'Category required');
         category = a.category!;
@@ -709,12 +1003,18 @@ function act(tx: Tx, a: Action): string | void {
         steps = ['Preflight: confirm symptom and capture device snapshot', notes[0] ? `Action (from resolved examples): ${notes[0]}` : 'Action: define with SMEs', 'Verify: confirm resolution evidence'];
         checks = ['Define verification check with SMEs'];
         title = `Draft: ${CATEGORY_LABEL[category]} remediation (from ${src.length} tickets)`;
+        rootCause = notes[0] ? `Most common recorded resolution: ${notes[0]}` : 'Root cause not yet identified — requires SME analysis';
       }
       const n = tx.s.seq.runbook + 1;
       tx.s.seq = { ...tx.s.seq, runbook: n };
       const rb: Runbook = {
         id: `RB-${String(n).padStart(3, '0')}`, version: 1, title, category, status: 'DRAFT', risk: 'HIGH', supportedOS: ['Windows 11'], steps, checks, rollbackSteps: [], reversible: false, disruptive: false,
-        expectedMin: 15, owner: tx.user.name, preapproved: false, diagnosticOnly: true, prerequisites: ['Human review'], recoveryNote: '', sourceTicketIds: src, createdAt: tx.nowIso, changeNote: 'Proposed draft — not executable until published and validated',
+        expectedMin: 15, owner: tx.user.name, diagnosticOnly: true, prerequisites: ['Human review', 'Symptom confirmed by telemetry or employee report'],
+        recoveryNote: 'Manual recovery: an agent reverses the step-2 change by hand; no automated rollback is defined', sourceTicketIds: src, createdAt: tx.nowIso,
+        changeNote: 'AI-generated draft (simulated, template-based) — not executable until reviewed, validated and published by an administrator',
+        stepDefs: defaultStepDefs(steps, 'HIGH', checks, false), maturity: 0, maturityHistory: [], restartRequired: false, aiGenerated: true,
+        rootCause: rootCause, applicability: `${CATEGORY_LABEL[category]} incidents on managed Windows 11 Standard-group devices with matching symptoms`,
+        risks: ['Generated from limited resolved examples — validate with SMEs', 'Disruption and reversibility not yet characterised', 'No simulator action selected — guidance only until an admin selects one'],
       };
       tx.s.runbooks = [...tx.s.runbooks, rb];
       tx.audit({ ticketId: a.fromTicketId, action: 'RUNBOOK_DRAFTED', reason: `${rb.id} v1 drafted (${CATEGORY_LABEL[category]}); default HIGH risk, not preapproved`, metadata: { runbook: rb.id, sourceTickets: src.length } });
@@ -722,12 +1022,14 @@ function act(tx: Tx, a: Action): string | void {
       return `${rb.id} draft created — no automatic activation`;
     }
     case 'UPDATE_DRAFT': {
-      adminOnly(tx);
+      notManager(tx);
       const rb = runbookAt(tx, a.runbookId, a.version);
       req(rb.status === 'DRAFT', 'BLOCKED', 'Only drafts can be edited — create a new version instead');
       const { id: _i, version: _v, status: _s, ...patch } = a.patch; void _i; void _v; void _s;
+      req(tx.user.role === 'ADMIN' || patch.actionKey === undefined || patch.actionKey === rb.actionKey, 'UNAUTHORIZED', 'Only an administrator can attach an executable simulator action');
       const next: Runbook = { ...rb, ...patch };
       if (!next.actionKey) next.diagnosticOnly = true;
+      if (patch.steps || patch.checks || patch.risk || patch.reversible !== undefined) next.stepDefs = rb.id === 'RB-007' && next.steps.length === rb.steps.length ? rb.stepDefs : defaultStepDefs(next.steps, next.risk, next.checks, next.reversible);
       replaceRunbook(tx, next);
       tx.audit({ action: 'RUNBOOK_UPDATED', reason: `${rb.id} v${rb.version} draft edited`, metadata: { runbook: rb.id, version: rb.version, fields: Object.keys(patch) } });
       return 'Draft saved';
@@ -735,13 +1037,15 @@ function act(tx: Tx, a: Action): string | void {
     case 'PUBLISH_RUNBOOK': {
       adminOnly(tx);
       const rb = runbookAt(tx, a.runbookId, a.version);
-      req(rb.status === 'DRAFT', 'BLOCKED', 'Only drafts can be published');
+      req(rb.status === 'UNDER_REVIEW', 'BLOCKED', 'Submit the draft for review first — only runbooks under review can be approved and published');
       const errs = validateRunbook(rb);
       req(!errs.length, 'VALIDATION', errs.join('; '));
       for (const r of tx.s.runbooks) if (r.id === rb.id && r.status === 'APPROVED') replaceRunbook(tx, { ...r, status: 'RETIRED', retiredAt: tx.nowIso, changeNote: `${r.changeNote ?? ''} · superseded by v${rb.version}` });
-      const pub: Runbook = { ...rb, status: 'APPROVED', publishedAt: tx.nowIso, diagnosticOnly: !rb.actionKey, changeNote: a.note || rb.changeNote };
+      const to: Maturity = rb.actionKey ? 2 : 1;
+      const pub: Runbook = { ...rb, status: 'APPROVED', publishedAt: tx.nowIso, diagnosticOnly: !rb.actionKey, changeNote: a.note || rb.changeNote, reviewedBy: tx.user.name, maturity: to,
+        maturityHistory: [...rb.maturityHistory, { from: rb.maturity, to, at: tx.nowIso, actor: tx.user.name, reason: to === 2 ? 'Published: new versions default to supervised (human-approved) execution' : 'Published as guidance only (no executable action)' }] };
       replaceRunbook(tx, pub);
-      tx.audit({ action: 'RUNBOOK_PUBLISHED', reason: `${rb.id} v${rb.version} published${pub.diagnosticOnly ? ' as diagnostic-only guidance (not executable)' : ''}`, metadata: { runbook: rb.id, version: rb.version, actionKey: rb.actionKey ?? null, preapproved: rb.preapproved, note: a.note } });
+      tx.audit({ action: 'RUNBOOK_PUBLISHED', reason: `${rb.id} v${rb.version} published${pub.diagnosticOnly ? ' as diagnostic-only guidance (not executable)' : ''}`, metadata: { runbook: rb.id, version: rb.version, actionKey: rb.actionKey ?? null, maturity: to, reviewedBy: tx.user.name, note: a.note } });
       invalidateRunbookPlans(tx, pub, `${rb.id} v${rb.version} published — pending plans re-evaluated`);
       return `${rb.id} v${rb.version} published`;
     }
@@ -751,7 +1055,7 @@ function act(tx: Tx, a: Action): string | void {
       req(versions.length, 'NOT_FOUND', 'Runbook not found');
       req(!versions.some((r) => r.status === 'DRAFT'), 'DUPLICATE', 'A draft version already exists');
       const latest = versions.sort((x, y) => y.version - x.version)[0];
-      const draft: Runbook = { ...latest, version: latest.version + 1, status: 'DRAFT', publishedAt: undefined, retiredAt: undefined, createdAt: tx.nowIso, changeNote: `Draft v${latest.version + 1} from v${latest.version}` };
+      const draft: Runbook = { ...latest, version: latest.version + 1, status: 'DRAFT', publishedAt: undefined, retiredAt: undefined, reviewedBy: undefined, submittedBy: undefined, submittedAt: undefined, maturity: 0, maturityHistory: [], createdAt: tx.nowIso, changeNote: `Draft v${latest.version + 1} from v${latest.version} (maturity resets to supervised on publication)` };
       tx.s.runbooks = [...tx.s.runbooks, draft];
       tx.audit({ action: 'RUNBOOK_DRAFTED', reason: `${draft.id} v${draft.version} draft created from v${latest.version}`, metadata: { runbook: draft.id, version: draft.version } });
       return `${draft.id} v${draft.version} draft created`;

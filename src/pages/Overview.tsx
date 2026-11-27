@@ -1,15 +1,17 @@
 import { useMemo } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { AlertTriangle, CalendarClock, CheckSquare, FilterX, Info, Undo2, UserCheck, WifiOff } from 'lucide-react';
+import { CalendarClock, FilterX, Info } from 'lucide-react';
 import { useStore } from '../app/store';
 import { CATEGORIES, CATEGORY_LABEL } from '../domain/catalog';
 import {
   categoryBreakdown, closedInRange, cohort, dailyResolvedByPath, defaultRange, durationByPath, fmtNum, fmtPct, funnel, guardrails, kpis, opportunities,
-  previousPeriod, queueSnapshot, statusBreakdown, type Filters, type MetricKey,
+  previousPeriod, statusBreakdown, type Filters, type MetricKey,
 } from '../domain/metrics';
 import { addDaysKey, localDateKey } from '../domain/util';
 import { PATH_LABEL } from '../components/ui';
+import { Workspace } from '../components/Workspace';
+import { BusinessImpact } from '../components/BusinessImpact';
 import type { Path } from '../domain/types';
 
 const PATH_COLOR: Record<Path, string> = { AUTO_POLICY: 'var(--series-1)', HUMAN_APPROVED: 'var(--series-2)', MANUAL: 'var(--series-3)' };
@@ -65,7 +67,6 @@ export function OverviewPage() {
       buckets: statusBreakdown(state, f), closed: closedInRange(state, f).length, gaps: opportunities(state).gaps.slice(0, 5), prevHasData: cohort(state, prev).length > 0,
     };
   }, [state, f.from, f.to, f.source, f.category, f.group, f.path]); // eslint-disable-line react-hooks/exhaustive-deps
-  const q = useMemo(() => queueSnapshot(state, now), [state, now]);
   const { k, kp, g } = data;
   const delta = (cur: number | null, old: number | null, pct = false) => {
     if (!data.prevHasData || cur === null || old === null) return 'Prev. period: — insufficient data';
@@ -80,6 +81,8 @@ export function OverviewPage() {
       <div className="page-head">
         <div><h1>Endpoint remediation overview</h1><p>Intake cohort: tickets <strong>created</strong> {f.from} → {f.to} (inclusive, local time) matching filters, measured as of now. All durations and savings are <strong>modeled</strong> from category baselines, not measured outcomes.</p></div>
       </div>
+      <Workspace />
+      <h2 style={{ marginTop: 24 }}>Analytics</h2>
       <div className="filters" role="group" aria-label="Dashboard filters">
         <div className="field auto"><span>Date range</span><div className="seg" role="group" aria-label="Date presets">{PRESETS.map((x) => <button key={x.k} aria-pressed={preset === x.k} onClick={() => set({ preset: x.k, from: null, to: null })}>{x.l}</button>)}<button aria-pressed={preset === 'custom'} onClick={() => set({ preset: 'custom', from: f.from, to: f.to })}>Custom</button></div></div>
         {preset === 'custom' && <><label className="field">From<input type="date" value={f.from} max={localDateKey(now)} onChange={(e) => e.target.value && set({ from: e.target.value })} /></label><label className="field">To<input type="date" value={f.to} max={localDateKey(now)} onChange={(e) => e.target.value && set({ to: e.target.value })} /></label></>}
@@ -90,15 +93,7 @@ export function OverviewPage() {
         <button className="btn" disabled={!dims && preset === '30'} onClick={() => set({ preset: null, from: null, to: null, source: null, category: null, group: null, path: null })}><FilterX size={14} aria-hidden />Clear filters</button>
       </div>
 
-      <h2 className="small muted" style={{ textTransform: 'uppercase', letterSpacing: '.04em' }}>Operational queue · current snapshot (independent of date filter)</h2>
-      <div className="queue-strip">
-        <Link className="queue-item" to="/approvals"><CheckSquare size={18} aria-hidden /><div><div className="n">{q.pending}</div><div className="small">Pending approvals</div></div></Link>
-        <Link className="queue-item" to="/approvals"><AlertTriangle size={18} color="var(--warning)" aria-hidden /><div><div className="n">{q.overdue}</div><div className="small">Overdue (&gt; {state.policy.approvalTTLMin} min)</div></div></Link>
-        <Link className="queue-item" to="/approvals?tab=consent"><UserCheck size={18} aria-hidden /><div><div className="n">{q.consent}</div><div className="small">Awaiting consent</div></div></Link>
-        <Link className="queue-item" to="/incidents?status=ROLLBACK_AVAILABLE"><Undo2 size={18} color="var(--danger)" aria-hidden /><div><div className="n">{q.rollback}</div><div className="small">Rollback attention</div></div></Link>
-        <Link className="queue-item" to="/incidents?status=WAITING_DEVICE"><WifiOff size={18} aria-hidden /><div><div className="n">{q.waiting}</div><div className="small">Waiting for device</div></div></Link>
-      </div>
-
+      <h2 style={{ marginTop: 8 }}>Outcomes &amp; guardrails</h2>
       <div className="grid grid-4" style={{ marginBottom: 16 }} data-testid="kpis">
         <Kpi label="Total incidents" value={String(k.total)} sub={`${k.employee} employee · ${k.detection} proactive`} delta={delta(k.total, kp.total)} to={drillLink(f, 'all')} />
         <Kpi label="Auto-closed" value={String(k.autoClosed)} sub="Closed · policy-preapproved path" delta={delta(k.autoClosed, kp.autoClosed)} to={drillLink(f, 'autoClosed')} />
@@ -134,8 +129,8 @@ export function OverviewPage() {
           <p className="small muted">Baselines for the same tickets: {data.dur.map((d) => `${PATH_LABEL[d.path]} ${d.baseline === null ? '—' : `${d.baseline.toFixed(0)}m`}`).join(' · ')}</p>
         </section>
         <section className="card chart-card" aria-labelledby="h-funnel">
-          <h2 id="h-funnel">Incident funnel</h2>
-          <p className="chart-summary">Intake → eligible at intake → executed (≥1 completed execution) → currently verified AI resolution → closed. {data.fun.map((x) => `${x.label} ${x.count}`).join(' → ')}.</p>
+          <h2 id="h-funnel">Automation funnel</h2>
+          <p className="chart-summary">One intake cohort and date range, nested stages: reported → eligible at intake → remediation attempted (execution started) → currently verified AI resolution. {data.fun.map((x) => `${x.label} ${x.count}`).join(' → ')}.</p>
           <BarList items={data.fun.map((x) => ({ label: x.label, n: x.count, to: drillLink(f, x.key) }))} color="var(--accent)" />
         </section>
         <section className="card chart-card" aria-labelledby="h-status">
@@ -162,6 +157,7 @@ export function OverviewPage() {
           </tbody></table>
         </section>
       </div>
+      <div style={{ marginBottom: 16 }}><BusinessImpact f={f} drill={(m, extra) => drillLink(f, m, extra)} /></div>
       <section className="card" aria-labelledby="h-gaps">
         <div className="row-between"><h2 id="h-gaps">Top automation gaps</h2><Link to="/opportunities">All opportunities</Link></div>
         <p className="chart-summary">All-time unsupported/manual tickets by category — modeled potential agent hours, not realized savings.</p>
