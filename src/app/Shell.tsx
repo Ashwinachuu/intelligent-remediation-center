@@ -51,6 +51,12 @@ export function Shell() {
   // Persistent runner: processes due work on mount and on a periodic tick (resumes from persisted timestamps).
   useEffect(() => { tick(); const h = setInterval(tick, 250); return () => clearInterval(h); }, [tick]);
   useEffect(() => { setDrawer(false); setNotifOpen(false); setDemoOpen(false); window.scrollTo?.(0, 0); }, [loc.pathname]);
+  useEffect(() => {
+    if (!drawer) return;
+    const k = (e: KeyboardEvent) => { if (e.key === 'Escape') setDrawer(false); };
+    document.addEventListener('keydown', k);
+    return () => document.removeEventListener('keydown', k);
+  }, [drawer]);
   const notifRef = useOutsideClose(notifOpen, () => setNotifOpen(false));
   const demoRef = useOutsideClose(demoOpen, () => setDemoOpen(false));
 
@@ -58,7 +64,7 @@ export function Shell() {
   const myNotifs = useMemo(() => state.notifications.filter((n) => n.recipient === role && (isAdmin || !n.ticketId || state.tickets[n.ticketId]?.employeeId === DEMO_EMPLOYEE.id)), [state.notifications, state.tickets, role, isAdmin]);
   const notifications = [...myNotifs].reverse().slice(0, 30);
   const unread = myNotifs.filter((n) => !n.read).length;
-  const switchRole = (r: Role) => { dispatch({ type: 'SET_ROLE', role: r }); nav(r === 'ADMIN' ? '/overview' : '/my-tickets'); };
+  const switchRole = (r: Role) => { if (r === role) return; dispatch({ type: 'SET_ROLE', role: r }); nav(r === 'ADMIN' ? '/overview' : '/my-tickets'); };
 
   const crumbs = useMemo(() => {
     const parts = loc.pathname.split('/').filter(Boolean);
@@ -83,7 +89,7 @@ export function Shell() {
           </div>
           <nav className="nav" aria-label="Primary">
             {NAV.map(({ to, label, Icon }) => (
-              <NavLink key={to} to={to} end={to === '/my-tickets' ? false : undefined}><Icon size={16} aria-hidden />{label}{to === '/approvals' && pending > 0 && <span className="badge count-badge" aria-label={`${pending} pending`}>{pending}</span>}</NavLink>
+              <NavLink key={to} to={to} end={to === '/my-tickets' ? false : undefined} onClick={() => setDrawer(false)}><Icon size={16} aria-hidden />{label}{to === '/approvals' && pending > 0 && <span className="badge count-badge" aria-label={`${pending} pending`}>{pending}</span>}</NavLink>
             ))}
           </nav>
         </aside>

@@ -209,3 +209,16 @@ test('Two tabs stay in sync without warnings', async ({ page, context }) => {
   await expect(other.getByText(/open in another tab/)).toHaveCount(0);
   await other.close();
 });
+
+test('Phone navigation drawer closes on Escape and when tapping the current page', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 812 });
+  await fresh(page);
+  const sidebar = page.locator('aside.sidebar');
+  await page.getByLabel('Open navigation').click();
+  await expect(sidebar).toHaveClass(/open/);
+  await page.keyboard.press('Escape');
+  await expect(sidebar).not.toHaveClass(/open/);
+  await page.getByLabel('Open navigation').click();
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Overview' }).click();
+  await expect(sidebar).not.toHaveClass(/open/);
+});
